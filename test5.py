@@ -1,166 +1,79 @@
-import torch
+import pandas as pd
 import numpy as np
-import xarray as xr
-import math
-from sklearn.cluster import DBSCAN
-from collections import defaultdict
 import matplotlib.pyplot as plt
+import seaborn as sns
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import matplotlib.colors as mcolors
+from cartopy.mpl.geoaxes import GeoAxes
+import matplotlib.path as mpath
 
-# 加载数据
-file_path = 'E:/GEO/test/test_1.nc'  # 替换为你的nc文件路径
-data = xr.open_dataset(file_path)
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+plt.rcParams['font.size'] = 16
+nums = [1,8,10]
+for n in nums:
+    if n == 1:
+        name = '成熟'
+    elif n == 8:
+        name = '生成'
+    else:
+        name = '消亡'
+    # 读取 CSV 文件（假设文件名为 data.csv）
+    df = pd.read_csv("trajectory_statistics_fin.csv")
 
-# 提取地表气压数据
-pressure_data = data['sp'].squeeze().values  # 删除时间维度
-latitudes = data['latitude'].values
-longitudes = data['longitude'].values
+    filtered_data = df
+    # 提取经纬度数据
+    lons = filtered_data.iloc[:, n].values  # 假设经度在第二列
+    lats = filtered_data.iloc[:, n+1].values  # 假设纬度在第三列
+    ids = filtered_data.iloc[:, 0].values  # 假设轨迹ID在第一列
 
-# 常量
-degree_to_km = 31  # 0.25° 大约等于 31 千米
-threshold_gradient = 0.15  # 气压梯度的阈值 (Pa/km)
-max_distance = 1200
+    # 创建投影转换器
+    proj = ccrs.NorthPolarStereo()
+    pc = ccrs.PlateCarree()
 
-# 将数据转换为张量，并移动到 GPU
-pressure_tensor = torch.tensor(pressure_data, device='cuda')
+    # 将经纬度转换为 NorthPolarStereo 投影坐标
+    x, y = proj.transform_points(pc, np.array(lons), np.array(lats))[:, :2].T
 
-# 为了处理边界点，使用填充
-padded_tensor = torch.nn.functional.pad(pressure_tensor, (1, 1, 1, 1), mode='constant', value=-np.inf)
+    # 创建极地投影绘图
+    fig, ax = plt.subplots(figsize=(8, 8), subplot_kw={'projection': proj})
 
-# 查找局部最大值：当前格点气压大于周围8个格点
-local_maxima_mask = (
-    (pressure_tensor > padded_tensor[:-2, :-2]) &
-    (pressure_tensor > padded_tensor[1:-1, :-2]) &
-    (pressure_tensor > padded_tensor[2:, :-2]) &
-    (pressure_tensor > padded_tensor[:-2, 1:-1]) &
-    (pressure_tensor > padded_tensor[2:, 1:-1]) &
-    (pressure_tensor > padded_tensor[:-2, 2:]) &
-    (pressure_tensor > padded_tensor[1:-1, 2:]) &
-    (pressure_tensor > padded_tensor[2:, 2:]) &
-    (padded_tensor[:-2, :-2] > 102000) &  # 上左
-    (padded_tensor[1:-1, :-2] > 102000) &  # 上中
-    (padded_tensor[2:, :-2] > 102000) &  # 上右
-    (padded_tensor[:-2, 1:-1] > 102000) &  # 中左
-    (padded_tensor[2:, 1:-1] > 102000) &  # 中右
-    (padded_tensor[:-2, 2:] > 102000) &  # 下左
-    (padded_tensor[1:-1, 2:] > 102000) &  # 下中
-    (padded_tensor[2:, 2:] > 102000)  # 下右
-)
+    # 添加地图特征
+    ax.set_extent([-180, 180, 20, 90], crs=ccrs.PlateCarree())  # 只显示北纬 30° 及以上
+    ax.add_feature(cfeature.LAND, facecolor='lightgray')
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
 
-# 计算气压梯度
-dy, dx = torch.gradient(pressure_tensor)
+    # 绘制热点图（在转换后的坐标上）
+    hb = sns.kdeplot(x=x, y=y, alpha=0.6, levels=20, cmap="Reds", ax=ax, fill=True)
 
-# 将梯度从“每度”转换为“每千米”
-dy = dy / degree_to_km
-dx = dx / degree_to_km
+    # 获取热点图数据的最小值和最大值
+    min_val = np.min(hb.collections[0].get_array())
+    max_val = np.max(hb.collections[0].get_array())
 
-# 为了处理边界点，使用填充对气压梯度进行填充
-padded_dy = torch.nn.functional.pad(dy, (1, 1, 1, 1), mode='constant', value=-np.inf)
-padded_dx = torch.nn.functional.pad(dx, (1, 1, 1, 1), mode='constant', value=-np.inf)
+    # 创建一个 ScalarMappable 对象
+    sm = plt.cm.ScalarMappable(cmap="Reds", norm=plt.Normalize(vmin=min_val, vmax=max_val))
 
-# 遍历局部最大值的掩码，判断其四个相邻点的气压梯度是否都大于阈值
-valid_points_mask = local_maxima_mask.clone()  # 克隆局部最大值掩码
+    '''# 绘制颜色条
+    cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', pad=0.05)
+    cbar.set_label('核密度')
+    '''
+    # 添加网格和标题
+    ax.gridlines(color='C7', lw=1, ls=':', draw_labels=True, rotate_labels=False, ylocs=[40, 60, 80])
 
-# 定义一个函数来计算方向上的气压梯度平均值
-def calculate_average_gradient(gradient, index, direction):
-    if direction == 'up':
-        start_idx = max(0, index - 10)
-        end_idx = index
-    elif direction == 'down':
-        start_idx = index + 1
-        end_idx = min(gradient.shape[0], index + 11)
-    elif direction == 'left':
-        start_idx = max(0, index - 10)
-        end_idx = index
-    elif direction == 'right':
-        start_idx = index + 1
-        end_idx = min(gradient.shape[1], index + 11)
+    # 添加经纬网及标注
+    def polarCentral_set_latlim(lat_lims, ax):
+        ax.set_extent([-180, 180, lat_lims[0], lat_lims[1]], ccrs.PlateCarree())
+        theta = np.linspace(0, 2 * np.pi, 100)
+        center, radius = [0.5, 0.5], 0.5
+        verts = np.vstack([np.sin(theta), np.cos(theta)]).T
+        circle = mpath.Path(verts * radius + center)
+        ax.set_boundary(circle, transform=ax.transAxes)
 
-    return torch.mean(gradient[start_idx:end_idx])
+    # 设置绘制区域范围
+    polarCentral_set_latlim((20, 90), ax)
 
-# 使用填充的梯度来计算平均值并更新有效点掩码
-for idx in range(10, pressure_tensor.shape[0] - 10):
-    # 上（纬度方向）
-    avg_grad_up = calculate_average_gradient(padded_dy, idx, 'up')
-    # 下（纬度方向）
-    avg_grad_down = calculate_average_gradient(padded_dy, idx, 'down')
-    # 左（经度方向）
-    avg_grad_left = calculate_average_gradient(padded_dx, idx, 'left')
-    # 右（经度方向）
-    avg_grad_right = calculate_average_gradient(padded_dx, idx, 'right')
-
-    # 更新有效点掩码：判断四个方向的平均梯度绝对值是否大于阈值
-    valid_points_mask[idx] &= (
-        abs(avg_grad_up) > threshold_gradient and
-        abs(avg_grad_down) > threshold_gradient and
-        abs(avg_grad_left) > threshold_gradient and
-        abs(avg_grad_right) > threshold_gradient
-    )
-
-# 获取有效点的坐标索引
-valid_lat_indices, valid_lon_indices = torch.nonzero(valid_points_mask, as_tuple=True)
-
-# 将索引转换为纬度和经度
-valid_lats = latitudes[valid_lat_indices.cpu()]
-valid_lons = longitudes[valid_lon_indices.cpu()]
-valid_pressures = pressure_tensor[valid_lat_indices, valid_lon_indices].cpu()
-
-# 输出有效点的坐标和气压值
-valid_points = list(zip(valid_lats, valid_lons, valid_pressures.tolist()))
-
-# Convert valid_points to a NumPy array
-valid_points = np.array(valid_points)
-
-# Filter out points with pressure less than 101000
-valid_points = valid_points[valid_points[:, 2] >= 102000]
-
-valid_points_coor = valid_points[:, :2]
-
-# 执行 DBSCAN 聚类
-dbscan = DBSCAN(eps=9.67, min_samples=2)  # 您可能需要调整 eps 和 min_samples
-cluster_labels = dbscan.fit_predict(valid_points_coor)
-
-# 将聚类标签添加到 valid_points 数组中
-valid_points_clustered = np.concatenate((valid_points, cluster_labels[:, np.newaxis]), axis=1)
-
-# 创建一个字典来存储每个聚类中气压值最大的坐标和气压值
-cluster_max_pressure = defaultdict(lambda: (-1, -1))  # 默认值为-1
-
-for label in np.unique(cluster_labels):
-    cluster_mask = valid_points_clustered[:, -1] == label
-    cluster_data = valid_points_clustered[cluster_mask]
-
-    max_pressure_idx = np.argmax(cluster_data[:, 2])  # 找到最大气压值的索引
-    max_pressure_coord = cluster_data[max_pressure_idx, :2]  # 获取最大气压值的坐标
-    max_pressure_value = cluster_data[max_pressure_idx, 2]  # 获取最大气压值
-
-    # 存储每个聚类中气压值最大的坐标和气压值
-    cluster_max_pressure[label] = (max_pressure_coord, max_pressure_value)
-
-# 输出每个聚类中气压值最大的坐标和气压值
-for label, (coord, pressure) in cluster_max_pressure.items():
-    print(f"聚类 {label} 中气压值最大的坐标：{coord}, 气压值：{pressure}")
-
-# 创建图形和子图
-fig, ax = plt.subplots()
-
-# 按照聚类标签循环绘制数据点
-for label in np.unique(cluster_labels):
-    cluster_mask = valid_points_clustered[:, -1] == label
-    cluster_data = valid_points_clustered[cluster_mask]
-
-    # 绘制当前聚类中的所有数据点
-    ax.scatter(cluster_data[:, 1], cluster_data[:, 0], label=f'Cluster {label}', alpha=0.7)
-
-    # 获取最大气压值点的坐标和气压值
-    max_pressure_coord, max_pressure_value = cluster_max_pressure[label]
-
-    # 根据最大气压值点的坐标添加标记
-    ax.scatter(max_pressure_coord[1], max_pressure_coord[0], color='red', marker='x', label=f'Max Pressure: {int(max_pressure_value)}')
-
-# 设置图例
-ax.set_xlabel('Longitude')
-ax.set_ylabel('Latitude')
-ax.set_title('Clustered Data with Max Pressure Points')
-
-# 显示图形
-plt.show()
+    # 设置标题
+    # ax.set_title(f"北半球温带反气旋{name}点核密度空间分布图", fontsize=14)
+    plt.savefig(f'E:/GEO/result/anticyclone/{name}_kde.png',dpi=600)
+    # 显示图形
+    plt.show()

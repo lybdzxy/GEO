@@ -1,152 +1,140 @@
-import xarray as xr
-import matplotlib.pyplot as plt
 import numpy as np
-import cartopy.crs as ccrs
-import cartopy.feature as cfeature
-import warnings
-from matplotlib.path import Path
-import math
-# 读取上传的 netCDF 文件
-file_path = 'E:/GEO/test/test_slp.nc'
-data = xr.open_dataset(file_path)
+import pandas as pd
+import matplotlib.pyplot as plt
+import pycwt as wavelet
+from scipy import signal
+from scipy.interpolate import interp1d
 
-# 获取经度、纬度和地表气压数据
-lon = data['longitude'].values
-lat = data['latitude'].values
-pressure = data['msl'].values.squeeze() / 100  # 转换为百帕 (hPa)
+# 设置中文字体
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
 
-# 只选择气压值大于等于1010 hPa的区域
-pressure_above_1010 = np.where(pressure >= 1010, pressure, np.nan)
+# 1. 加载数据
+df = pd.read_csv('annual_trajectory_amount.csv')  # 假设数据文件名为 annual_trajectory_amount.csv
+t = df.iloc[:, 0].values  # 时间列（年份，例如1960-2023）
+dat = df.iloc[:, 1].values  # 数据列（例如反气旋数量）
 
-# 设置绘图区域
-interval = 1
-proj = ccrs.LambertAzimuthalEqualArea(central_longitude=0, central_latitude=90)
-leftlon, rightlon, lowerlat, upperlat = (-180, 180, 20, 90)
-img_extent = [leftlon, rightlon, lowerlat, upperlat]
+# 2. 数据预处理
+dt = 1  # 采样间隔（每年一个数据点）
+dat_detrended = signal.detrend(dat)  # 去除线性趋势
+dat_std = (dat_detrended - np.mean(dat_detrended)) / np.std(dat_detrended)  # 标准化
 
-# 绘制等压线图
-fig1 = plt.figure(figsize=(20, 20))
-f1_ax1 = fig1.add_axes([0.1, 0.1, 0.8, 0.8], projection=ccrs.NorthPolarStereo(central_longitude=0))
-f1_ax1.gridlines(crs=ccrs.PlateCarree(), draw_labels=True, linewidth=1, color='k', linestyle='--')
-f1_ax1.add_feature(cfeature.COASTLINE)
-f1_ax1.set_extent(img_extent, ccrs.PlateCarree())
+# 3. 设置小波分析参数
+mother = wavelet.Morlet(6)  # 使用Morlet小波，中心频率为6
+s0 = 2 * dt  # 最小尺度
+dj = 0.0625  # 尺度分辨率
+J = int(np.log2(len(dat_std) * dt / s0) / dj)  # 尺度数量
 
-# 绘制等压线
-contours = plt.contour(lon, lat, pressure_above_1010, levels=np.arange(1010, pressure.max(), interval),
-                       transform=ccrs.PlateCarree(), colors='black')
+# 4. 进行连续小波变换
+wave, scales, freqs, coi, fft, fftfreqs = wavelet.cwt(dat_std, dt, dj, s0, J, mother)
 
-# 查找闭合等压线
-closed_contours = []
-tolerance = 0.001
-for c in contours.collections:
-    for path in c.get_paths():
-        # 提取路径的顶点和代码
-        vertices = path.vertices  # 顶点数组
-        codes = path.codes  # 操作代码 (MOVETO, LINETO, CLOSEPOLY)
+# 5. 计算小波功率谱
+power = (np.abs(wave)) ** 2
 
-        if codes is None:
-            # 如果没有 codes，无法区分子路径，跳过
-            continue
+# 6. 计算逆小波变换
+iwave = wavelet.icwt(wave, scales, dt, dj, mother).real
 
-        # 初始化子路径的顶点收集器
-        sub_path_vertices = []
+# 7. 计算全局小波谱
+glbl_power = np.mean(power, axis=1)
 
-        # 遍历路径中的每个点和操作代码
-        for i, code in enumerate(codes):
-            if code == Path.MOVETO:
-                # 遇到新的子路径，清空当前的顶点收集器
-                if sub_path_vertices:  # 如果之前的子路径未清空，检查是否闭合
-                    if np.allclose(sub_path_vertices[0], sub_path_vertices[-1], atol=tolerance):
-                        closed_contours.append(np.array(sub_path_vertices))  # 存储闭合子路径
-                sub_path_vertices = [vertices[i]]  # 初始化新的子路径
+# 8. 计算傅立叶谱
+fft_power = np.abs(fft) ** 2
 
-            elif code == Path.LINETO:
-                # 添加到当前子路径
-                sub_path_vertices.append(vertices[i])
+# 9. 计算显著性和理论噪声谱
+alpha, _, _ = wavelet.ar1(dat_std)  # 使用标准化数据计算红噪声自相关
+N = len(t)  # 时间点数量
+dof = N - scales  # 自由度校正
+signif, fft_theor = wavelet.significance(1, dt, scales, 0, alpha,
+                                         significance_level=0.95, dof=dof, wavelet=mother)
 
-            elif code == Path.CLOSEPOLY:
-                # 闭合子路径：直接检查起点和终点是否相等
-                sub_path_vertices.append(vertices[i])
-                if np.allclose(sub_path_vertices[0], sub_path_vertices[-1], atol=tolerance):
-                    closed_contours.append(np.array(sub_path_vertices))
-                sub_path_vertices = []  # 清空子路径
+# 10. 计算周期
+period = 1 / freqs
 
-        # 检查最后一个子路径是否闭合
-        if sub_path_vertices and np.allclose(sub_path_vertices[0], sub_path_vertices[-1], atol=tolerance):
-            closed_contours.append(np.array(sub_path_vertices))
+# 11. 插值 fft_theor 以匹配 period
+log_scales = np.log2(scales)  # 对数尺度
+log_period = np.log2(period)  # 对数周期
+interp_func = interp1d(log_scales, fft_theor, kind='linear', fill_value="extrapolate")
+fft_theor_interp = interp_func(log_period)  # 插值后的理论傅立叶谱
+
+# 12. 计算尺度平均小波谱（2-8年）
+sel = np.where((period >= 2) & (period < 8))[0]  # 找到 2-8 年的索引
+Cdelta = mother.cdelta  # 小波常数
+scale_avg = (scales * np.ones((N, 1))).transpose()  # 扩展尺度
+scale_avg = power / scale_avg  # 按 Torrence 和 Compo (1998) 公式 24 归一化
+scale_avg = np.var(dat_std) * dj * dt / Cdelta * scale_avg[sel, :].sum(axis=0)  # 尺度平均功率
+scale_avg_signif, tmp = wavelet.significance(np.var(dat_std), dt, scales, 2, alpha,
+                                             significance_level=0.95,
+                                             dof=[scales[sel[0]],
+                                                  scales[sel[-1]]],
+                                             wavelet=mother)
+
+# 13. 显著性水平（简化处理）
+signif, fft_theor = wavelet.significance(1.0, dt, scales, 0, alpha,
+                                         significance_level=0.95,
+                                         wavelet=mother)
+sig951 = np.ones([1, N]) * signif[:, None]
+sig95 = power / sig951
+glbl_power = power.mean(axis=1)
+dof = N - scales  # Correction for padding at edges
+glbl_signif, tmp = wavelet.significance(np.var(dat_std), dt, scales, 1, alpha,
+                                        significance_level=0.95, dof=dof,
+                                        wavelet=mother)
 
 
-# 输出过滤结果
-if not closed_contours:
-    print("未找到符合半径要求的闭合等压线")
-else:
-    print(f"找到 {len(closed_contours)} 条符合半径要求的闭合等压线")
+# 14. 绘图设置
+plt.close('all')
+plt.ioff()
+figprops = dict(figsize=(11, 8), dpi=200)
+fig = plt.figure(**figprops)
+fig.suptitle('北半球温带反气旋数量小波分析')
 
-# 可视化符合要求的闭合等压线
-for contour in closed_contours:
-    f1_ax1.plot(contour[:, 0], contour[:, 1], transform=ccrs.PlateCarree(), color='red', linewidth=2)
+# 子图1：原始数据和逆小波变换
+ax = plt.axes([0.1, 0.75, 0.65, 0.15])
+ax.plot(t, iwave, '-', linewidth=1, color=[0.5, 0.5, 0.5], label='逆小波变换')
+ax.plot(t, dat_std, 'k', linewidth=1.5, label='标准化数据')
+ax.set_title('a) 标准化数据和逆小波变换')
+ax.set_ylabel('幅度')
+ax.legend()
 
+# 子图2：小波功率谱
+bx = plt.axes([0.1, 0.37, 0.65, 0.28], sharex=ax)
+levels = [0.0625, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16]
+bx.contourf(t, np.log2(period), np.log2(power), np.log2(levels), extend='both', cmap=plt.cm.viridis)
+extent = [t.min(), t.max(), 0, max(period)]
+bx.contour(t, np.log2(period), sig95, [-99, 1], colors='k', linewidths=2, extent=extent)
+bx.fill(np.concatenate([t, t[-1:] + dt, t[-1:] + dt, t[:1] - dt, t[:1] - dt]),
+        np.concatenate([np.log2(coi), [1e-9], np.log2(period[-1:]), np.log2(period[-1:]), [1e-9]]),
+        'k', alpha=0.3, hatch='x')
+bx.set_title('b) 小波功率谱 (Morlet)')
+bx.set_ylabel('周期 (年)')
+Yticks = 2 ** np.arange(np.ceil(np.log2(period.min())), np.ceil(np.log2(period.max())))
+bx.set_yticks(np.log2(Yticks))
+bx.set_yticklabels(Yticks)
+
+# 子图3：全局小波和傅立叶谱
+cx = plt.axes([0.77, 0.37, 0.2, 0.28], sharey=bx)
+cx.plot(glbl_signif, np.log2(period), 'k--', label='显著性')
+cx.plot(fft_theor_interp, np.log2(period), '--', color='#cccccc', label='理论傅立叶')
+cx.plot(fft_power, np.log2(1./fftfreqs), '-', color='#cccccc', linewidth=1., label='傅立叶功率')
+cx.plot(glbl_power, np.log2(period), 'k-', linewidth=1.5, label='全局小波')
+cx.set_title('c) 全局小波谱')
+cx.set_xlabel('功率')
+cx.set_xlim([0, glbl_power.max() + 1])
+cx.set_ylim(np.log2([period.min(), period.max()]))
+cx.set_yticks(np.log2(Yticks))
+cx.set_yticklabels(Yticks)
+plt.setp(cx.get_yticklabels(), visible=False)
+cx.legend()
+
+# 子图4：尺度平均小波谱
+dx = plt.axes([0.1, 0.07, 0.65, 0.2], sharex=ax)
+dx.axhline(scale_avg_signif, color='k', linestyle='--', linewidth=1., label='显著性')
+dx.plot(t, scale_avg, 'k-', linewidth=1.5, label='尺度平均功率')
+dx.set_title('d) 2-8 年尺度平均功率')
+dx.set_xlabel('时间 (年)')
+dx.set_ylabel('平均方差')
+ax.set_xlim([t.min(), t.max()])
+dx.legend()
+
+# 显示图形
 plt.show()
-
-
-# 构建包含关系字典
-containment_dict = {}  # {outer_index: [inner_indices]}
-for i, outer_path in enumerate(closed_contours):
-    outer_polygon = Path(outer_path)
-    containment_dict[i] = []  # 初始化列表
-    for j, inner_path in enumerate(closed_contours):
-        if i != j:
-            if np.all(outer_polygon.contains_points(inner_path)):
-                containment_dict[i].append(j)
-
-# 清理包含关系
-def simplify_containment(containment_dict):
-    simplified_dict = containment_dict.copy()
-    for parent, children in list(containment_dict.items()):
-        if len(children) > 1:
-            # 多子节点情况：移除当前节点，保留子节点
-            del simplified_dict[parent]
-            for child in children:
-                if child in simplified_dict:
-                    simplified_dict[child] = simplified_dict.get(child, [])
-    return simplified_dict
-
-# 提取最外层和最内层等压线
-def find_outer_and_inner_after_simplification(simplified_dict):
-    # 所有等压线索引
-    all_contours = set(simplified_dict.keys())
-    # 子节点集合
-    inner_contours = {idx for inner_list in simplified_dict.values() for idx in inner_list}
-    # 最外层：未被其他等压线包含
-    outer_contours = list(all_contours - inner_contours)
-    # 最内层：没有子节点
-    inner_most_contours = [idx for idx, inner_list in simplified_dict.items() if not inner_list]
-    return outer_contours, inner_most_contours
-
-# 简化包含关系
-simplified_dict = simplify_containment(containment_dict)
-
-# 提取最外层和最内层
-outer_contours, inner_most_contours = find_outer_and_inner_after_simplification(simplified_dict)
-
-# 绘图展示
-fig2 = plt.figure(figsize=(20, 20))
-ax2 = fig2.add_subplot(1, 1, 1, projection=ccrs.NorthPolarStereo(central_longitude=0))
-ax2.add_feature(cfeature.COASTLINE)
-ax2.set_extent(img_extent, ccrs.PlateCarree())
-ax2.gridlines(crs=ccrs.PlateCarree(), draw_labels=True, linewidth=1, color='gray', linestyle='--')
-
-# 绘制最外层等压线（红色）
-for outer_idx in outer_contours:
-    outer_path = closed_contours[outer_idx]
-    ax2.plot(outer_path[:, 0], outer_path[:, 1], transform=ccrs.PlateCarree(),
-             color='red', linewidth=2, label=f'Outer {outer_idx}')
-
-# 绘制最内层等压线（绿色）
-for inner_idx in inner_most_contours:
-    inner_path = closed_contours[inner_idx]
-    ax2.plot(inner_path[:, 0], inner_path[:, 1], transform=ccrs.PlateCarree(),
-             color='green', linewidth=2, linestyle='--', label=f'Inner {inner_idx}')
-
-plt.show()
-

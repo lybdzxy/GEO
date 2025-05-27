@@ -1,166 +1,359 @@
-import torch
-import numpy as np
+import csv
+import time
+
 import xarray as xr
-import math
-from sklearn.cluster import DBSCAN
-from collections import defaultdict
+from matplotlib.path import Path
+import warnings
+import numpy as np
 import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+start = time.time()
+warnings.filterwarnings("ignore")
 
-# 加载数据
-file_path = 'E:/GEO/test/test_slp.nc'  # 替换为你的nc文件路径
+# ============================
+# 1. 数据读取与预处理
+# ============================
+file_path = 'E:/testidm/slp20205.nc'
 data = xr.open_dataset(file_path)
+data_sel = data.sel(valid_time='2020-05-27-12')
 
-# 提取地表气压数据
-pressure_data = data['msl'].squeeze().values  # 删除时间维度
-latitudes = data['latitude'].values
-longitudes = data['longitude'].values
+# 提取经度、纬度和海平面气压数据（转换为 hPa）
+lon = data_sel['longitude'].values
+lat = data_sel['latitude'].values
+pressure = data_sel['msl'].values.squeeze() / 100  # 转换为 hPa
 
-# 常量
-degree_to_km = 31  # 0.25° 大约等于 31 千米
-threshold_gradient = 0.15  # 气压梯度的阈值 (Pa/km)
-max_distance = 1200
+# 将气压低于 1010 hPa 的部分设为 nan
+pressure_above_1010 = np.where(pressure >= 1010, pressure, np.nan)
 
-# 将数据转换为张量，并移动到 GPU
-pressure_tensor = torch.tensor(pressure_data, device='cuda')
+# ============================
+# 2. 绘制等压线（用于获取轮廓数据）
+# ============================
+interval = 2
+img_extent = [-180, 180, 20, 90]
 
-# 为了处理边界点，使用填充
-padded_tensor = torch.nn.functional.pad(pressure_tensor, (1, 1, 1, 1), mode='constant', value=-np.inf)
+fig = plt.figure(figsize=(10, 10))
+ax = fig.add_subplot(111, projection=ccrs.NorthPolarStereo(central_longitude=0))
+ax.set_extent(img_extent, crs=ccrs.PlateCarree())
 
-# 查找局部最大值：当前格点气压大于周围8个格点
-local_maxima_mask = (
-    (pressure_tensor > padded_tensor[:-2, :-2]) &
-    (pressure_tensor > padded_tensor[1:-1, :-2]) &
-    (pressure_tensor > padded_tensor[2:, :-2]) &
-    (pressure_tensor > padded_tensor[:-2, 1:-1]) &
-    (pressure_tensor > padded_tensor[2:, 1:-1]) &
-    (pressure_tensor > padded_tensor[:-2, 2:]) &
-    (pressure_tensor > padded_tensor[1:-1, 2:]) &
-    (pressure_tensor > padded_tensor[2:, 2:]) &
-    (padded_tensor[:-2, :-2] > 102000) &  # 上左
-    (padded_tensor[1:-1, :-2] > 102000) &  # 上中
-    (padded_tensor[2:, :-2] > 102000) &  # 上右
-    (padded_tensor[:-2, 1:-1] > 102000) &  # 中左
-    (padded_tensor[2:, 1:-1] > 102000) &  # 中右
-    (padded_tensor[:-2, 2:] > 102000) &  # 下左
-    (padded_tensor[1:-1, 2:] > 102000) &  # 下中
-    (padded_tensor[2:, 2:] > 102000)  # 下右
-)
+contours = plt.contour(lon, lat, pressure_above_1010, levels=np.arange(1010, np.nanmax(pressure), interval),
+                       transform=ccrs.PlateCarree(), colors='black')
 
-# 计算气压梯度
-dy, dx = torch.gradient(pressure_tensor)
+# ============================
+# 3. 查找闭合等压线
+# ============================
+closed_contours = []
+tolerance = 0.001
+for c in contours.collections:
+    for path in c.get_paths():
+        vertices = path.vertices
+        codes = path.codes
+        if codes is None:
+            if np.allclose(vertices[0], vertices[-1], atol=tolerance):
+                closed_contours.append(vertices)
+            continue
+        sub_path_vertices = []
+        for i, code in enumerate(codes):
+            if code == Path.MOVETO:
+                if sub_path_vertices and np.allclose(sub_path_vertices[0], sub_path_vertices[-1], atol=tolerance):
+                    closed_contours.append(np.array(sub_path_vertices))
+                sub_path_vertices = [vertices[i]]
+            elif code == Path.LINETO:
+                sub_path_vertices.append(vertices[i])
+            elif code == Path.CLOSEPOLY:
+                sub_path_vertices.append(vertices[i])
+                if np.allclose(sub_path_vertices[0], sub_path_vertices[-1], atol=tolerance):
+                    closed_contours.append(np.array(sub_path_vertices))
+                sub_path_vertices = []
+        if sub_path_vertices and np.allclose(sub_path_vertices[0], sub_path_vertices[-1], atol=tolerance):
+            closed_contours.append(np.array(sub_path_vertices))
 
-# 将梯度从“每度”转换为“每千米”
-dy = dy / degree_to_km
-dx = dx / degree_to_km
+plt.close(fig)  # 关闭图像
 
-# 为了处理边界点，使用填充对气压梯度进行填充
-padded_dy = torch.nn.functional.pad(dy, (1, 1, 1, 1), mode='constant', value=-np.inf)
-padded_dx = torch.nn.functional.pad(dx, (1, 1, 1, 1), mode='constant', value=-np.inf)
 
-# 遍历局部最大值的掩码，判断其四个相邻点的气压梯度是否都大于阈值
-valid_points_mask = local_maxima_mask.clone()  # 克隆局部最大值掩码
+# 筛选半径大于阈值的等压线
+def calculate_radius(contour):
+    center_x = np.mean(contour[:, 0])
+    center_y = np.mean(contour[:, 1])
+    distances = np.sqrt((contour[:, 0] - center_x) ** 2 + (contour[:, 1] - center_y) ** 2)
+    return np.mean(distances)
 
-# 定义一个函数来计算方向上的气压梯度平均值
-def calculate_average_gradient(gradient, index, direction):
-    if direction == 'up':
-        start_idx = max(0, index - 10)
-        end_idx = index
-    elif direction == 'down':
-        start_idx = index + 1
-        end_idx = min(gradient.shape[0], index + 11)
-    elif direction == 'left':
-        start_idx = max(0, index - 10)
-        end_idx = index
-    elif direction == 'right':
-        start_idx = index + 1
-        end_idx = min(gradient.shape[1], index + 11)
 
-    return torch.mean(gradient[start_idx:end_idx])
+min_radius_threshold = 0.5
+filtered_contours = [contour for contour in closed_contours if calculate_radius(contour) >= min_radius_threshold]
 
-# 使用填充的梯度来计算平均值并更新有效点掩码
-for idx in range(10, pressure_tensor.shape[0] - 10):
-    # 上（纬度方向）
-    avg_grad_up = calculate_average_gradient(padded_dy, idx, 'up')
-    # 下（纬度方向）
-    avg_grad_down = calculate_average_gradient(padded_dy, idx, 'down')
-    # 左（经度方向）
-    avg_grad_left = calculate_average_gradient(padded_dx, idx, 'left')
-    # 右（经度方向）
-    avg_grad_right = calculate_average_gradient(padded_dx, idx, 'right')
 
-    # 更新有效点掩码：判断四个方向的平均梯度绝对值是否大于阈值
-    valid_points_mask[idx] &= (
-        abs(avg_grad_up) > threshold_gradient and
-        abs(avg_grad_down) > threshold_gradient and
-        abs(avg_grad_left) > threshold_gradient and
-        abs(avg_grad_right) > threshold_gradient
-    )
+# ============================
+# 4. 构建包含关系字典
+# ============================
+def build_containment_dict(filtered_contours):
+    containment_dict = {}
+    paths = [Path(contour) for contour in filtered_contours]
+    for i, outer_path in enumerate(paths):
+        containment_dict[i] = []
+        for j, inner_path in enumerate(paths):
+            if i != j:
+                if np.all(outer_path.contains_points(inner_path.vertices)):
+                    containment_dict[i].append(j)
+    return containment_dict
 
-# 获取有效点的坐标索引
-valid_lat_indices, valid_lon_indices = torch.nonzero(valid_points_mask, as_tuple=True)
 
-# 将索引转换为纬度和经度
-valid_lats = latitudes[valid_lat_indices.cpu()]
-valid_lons = longitudes[valid_lon_indices.cpu()]
-valid_pressures = pressure_tensor[valid_lat_indices, valid_lon_indices].cpu()
+containment_dict = build_containment_dict(filtered_contours)
 
-# 输出有效点的坐标和气压值
-valid_points = list(zip(valid_lats, valid_lons, valid_pressures.tolist()))
+# ============================
+# 5. 构建树结构
+# ============================
+class TreeNode:
+    def __init__(self, contour_index):
+        self.contour_index = contour_index
+        self.children = []
+        self.depth = 1  # 初始深度为1
 
-# Convert valid_points to a NumPy array
-valid_points = np.array(valid_points)
+    def add_child(self, child_node):
+        self.children.append(child_node)
 
-# Filter out points with pressure less than 101000
-valid_points = valid_points[valid_points[:, 2] >= 102000]
+    def __repr__(self):
+        return f"TreeNode({self.contour_index}, depth={self.depth}, children={len(self.children)})"
 
-valid_points_coor = valid_points[:, :2]
 
-# 执行 DBSCAN 聚类
-dbscan = DBSCAN(eps=9.67, min_samples=2)  # 您可能需要调整 eps 和 min_samples
-cluster_labels = dbscan.fit_predict(valid_points_coor)
+def build_trees(containment_dict):
+    nodes = {i: TreeNode(i) for i in containment_dict}
+    all_indices = set(containment_dict.keys())
+    contained_indices = set()
+    for contained in containment_dict.values():
+        contained_indices.update(contained)
+    root_indices = list(all_indices - contained_indices)
 
-# 将聚类标签添加到 valid_points 数组中
-valid_points_clustered = np.concatenate((valid_points, cluster_labels[:, np.newaxis]), axis=1)
+    for i, children in containment_dict.items():
+        node = nodes[i]
+        for child_index in children:
+            node.add_child(nodes[child_index])
+    return [nodes[r] for r in root_indices]
 
-# 创建一个字典来存储每个聚类中气压值最大的坐标和气压值
-cluster_max_pressure = defaultdict(lambda: (-1, -1))  # 默认值为-1
 
-for label in np.unique(cluster_labels):
-    cluster_mask = valid_points_clustered[:, -1] == label
-    cluster_data = valid_points_clustered[cluster_mask]
+trees = build_trees(containment_dict)
 
-    max_pressure_idx = np.argmax(cluster_data[:, 2])  # 找到最大气压值的索引
-    max_pressure_coord = cluster_data[max_pressure_idx, :2]  # 获取最大气压值的坐标
-    max_pressure_value = cluster_data[max_pressure_idx, 2]  # 获取最大气压值
+def update_depth(node):
+    if node.children:
+        child_depths = [update_depth(child) for child in node.children]
+        node.depth = 1 + max(child_depths)
+    else:
+        node.depth = 1
+    return node.depth
 
-    # 存储每个聚类中气压值最大的坐标和气压值
-    cluster_max_pressure[label] = (max_pressure_coord, max_pressure_value)
 
-# 输出每个聚类中气压值最大的坐标和气压值
-for label, (coord, pressure) in cluster_max_pressure.items():
-    print(f"聚类 {label} 中气压值最大的坐标：{coord}, 气压值：{pressure}")
+for root in trees:
+    update_depth(root)
 
-# 创建图形和子图
-fig, ax = plt.subplots()
+# 辅助函数：将树转换为单行字符串表示（用于调试输出）
+def tree_to_string(node):
+    s = f"TreeNode({node.contour_index}, depth={node.depth}"
+    if node.children:
+        s += ", children=["
+        s += ", ".join(tree_to_string(child) for child in node.children)
+        s += "]"
+    s += ")"
+    return s
 
-# 按照聚类标签循环绘制数据点
-for label in np.unique(cluster_labels):
-    cluster_mask = valid_points_clustered[:, -1] == label
-    cluster_data = valid_points_clustered[cluster_mask]
+# ============================
+# 6. 树清洗逻辑
+# ============================
+def clean_trees(trees):
+    processed_nodes = set()
+    filtered = [t for t in trees if t.depth >= 5]
 
-    # 绘制当前聚类中的所有数据点
-    ax.scatter(cluster_data[:, 1], cluster_data[:, 0], label=f'Cluster {label}', alpha=0.7)
+    # 第二步：递归拆分树
+    def split(tree):
+        # 广度优先搜索寻找可拆分节点
+        queue = [tree]
+        while queue:
+            current = queue.pop(0)
+            if current.contour_index in processed_nodes:
+                continue  # 跳过已处理的节点
+            processed_nodes.add(current.contour_index)
 
-    # 获取最大气压值点的坐标和气压值
-    max_pressure_coord, max_pressure_value = cluster_max_pressure[label]
+            # 检查当前节点的子节点
+            candidates = [c for c in current.children if c.depth > 3]
+            if len(candidates) >= 2:
+                return candidates  # 返回要拆分的子节点
+            queue.extend(current.children)
+        return None
 
-    # 根据最大气压值点的坐标添加标记
-    ax.scatter(max_pressure_coord[1], max_pressure_coord[0], color='red', marker='x', label=f'Max Pressure: {int(max_pressure_value)}')
+    final_trees = []
+    processing = filtered.copy()
+    while processing:
+        tree = processing.pop(0)
+        to_split = split(tree)
+        if to_split:
+            processing.extend([c for c in to_split if c.depth >= 5])
+        else:
+            final_trees.append(tree)
+            processed_nodes.add(tree_to_string(tree))
 
-# 设置图例
-ax.set_xlabel('Longitude')
-ax.set_ylabel('Latitude')
-ax.set_title('Clustered Data with Max Pressure Points')
+    # 第三步：修剪保留分支
+    def prune(node):
+        if not node.children:
+            return node
 
-# 显示图形
-plt.show()
+        # 分离深度>3的子节点
+        gt3 = [c for c in node.children if c.depth > 3]
+        if len(gt3) >= 1:
+            # 只保留深度最大的分支
+            max_depth = max(c.depth for c in node.children)
+            keep = [c for c in node.children if c.depth == max_depth]
+        else:
+            # 保留所有最大深度分支
+            max_depth = max(c.depth for c in node.children)
+            keep = [c for c in node.children if c.depth == max_depth]
+
+        # 递归修剪
+        new_node = TreeNode(node.contour_index)
+        new_node.depth = node.depth
+        for child in keep:
+            new_child = prune(child)
+            new_node.add_child(new_child)
+        return new_node
+
+    # 第四步：去重嵌套树
+    unique_trees = []
+    for tree in final_trees:
+        is_nested = False
+        for other_tree in final_trees:
+            if other_tree != tree and is_subtree(tree, other_tree):
+                is_nested = True
+                break
+        if not is_nested:
+            unique_trees.append(tree)
+
+    return [prune(t) for t in unique_trees]
+
+# 辅助函数：判断是否是子树
+def is_subtree(tree, parent_tree):
+    if tree.contour_index == parent_tree.contour_index:
+        return True
+    for child in parent_tree.children:
+        if is_subtree(tree, child):
+            return True
+    return False
+
+cleaned_trees = clean_trees(trees)
+
+def filter_small_outer_isobars(cleaned_trees, filtered_contours, min_radius=2.0):
+    valid_trees = []
+    for tree in cleaned_trees:
+        outer_contour = filtered_contours[tree.contour_index]
+        radius = calculate_radius(outer_contour)
+        if radius >= min_radius:
+            valid_trees.append(tree)
+    return valid_trees
+
+
+cleaned_trees = filter_small_outer_isobars(cleaned_trees, filtered_contours, min_radius=2.0)
+
+# ============================
+# 7. 提取高压中心和外层等压线
+# ============================
+def extract_outer_contours(cleaned_trees, filtered_contours):
+    outer_list = []
+    for idx, tree in enumerate(cleaned_trees):
+        contour = filtered_contours[tree.contour_index]
+        outer_list.append({
+            'contour': contour,
+            'tree_id': tree.contour_index,
+            'label': f"H{idx + 1:02d}"
+        })
+    return outer_list
+
+
+outer_contours = extract_outer_contours(cleaned_trees, filtered_contours)
+
+
+def extract_inner_contours(cleaned_trees, filtered_contours):
+    inner_contours = []
+    for tree in cleaned_trees:
+        stack = [tree]
+        leaf_nodes = []
+        while stack:
+            node = stack.pop()
+            if not node.children:
+                leaf_nodes.append(node)
+            else:
+                stack.extend(node.children)
+        for leaf in leaf_nodes:
+            inner_contours.append({
+                'contour': filtered_contours[leaf.contour_index],
+                'tree_id': tree.contour_index
+            })
+    return inner_contours
+
+
+inner_contours = extract_inner_contours(cleaned_trees, filtered_contours)
+
+
+def calculate_high_centers(inner_contours, lon, lat, pressure):
+    if lat[-1] < lat[0]:
+        lat = lat[::-1]
+        pressure = pressure[::-1, :]
+    high_centers = {}
+    for contour_data in inner_contours:
+        contour = contour_data['contour']
+        tree_id = contour_data['tree_id']
+        center_lon = np.mean(contour[:, 0])
+        center_lat = np.mean(contour[:, 1])
+        center_lon = np.clip(center_lon, lon.min(), lon.max())
+        center_lat = np.clip(center_lat, lat.min(), lat.max())
+        lon_idx = np.argmin(np.abs(lon - center_lon))
+        lat_idx = np.argmin(np.abs(lat - center_lat))
+        grid_lon = lon[lon_idx]
+        grid_lat = lat[lat_idx]
+        grid_p = pressure[lat_idx, lon_idx]
+        if not np.isnan(grid_p) and grid_p >= 1010:
+            if tree_id in high_centers:
+                if grid_p > high_centers[tree_id]['pressure']:
+                    high_centers[tree_id] = {
+                        'lon': grid_lon,
+                        'lat': grid_lat,
+                        'pressure': grid_p,
+                        'tree_id': tree_id
+                    }
+            else:
+                high_centers[tree_id] = {
+                    'lon': grid_lon,
+                    'lat': grid_lat,
+                    'pressure': grid_p,
+                    'tree_id': tree_id
+                }
+    return list(high_centers.values())
+
+
+high_centers = calculate_high_centers(inner_contours, lon, lat, pressure_above_1010)
+# ============================
+# 8. 输出到CSV文件
+# ============================
+date_str = str(data_sel['valid_time'].values.astype('datetime64[h]')).replace('T', ' ')
+outer_contour_dict = {oc['tree_id']: oc for oc in outer_contours}
+
+csv_rows = []
+for center in high_centers:
+    tree_id = center['tree_id']
+    outer_contour = outer_contour_dict.get(tree_id)
+    if not outer_contour:
+        continue
+
+    contour_points = outer_contour['contour']
+    points_str = ';'.join([f"{point[0]},{point[1]}" for point in contour_points])
+
+    csv_rows.append({
+        'date': date_str,
+        'center_lon': f"{center['lon']:.2f}",
+        'center_lat': f"{center['lat']:.2f}",
+        'pressure': f"{center['pressure']:.2f}",
+        'contour_points': points_str
+    })
+
+csv_path = 'high_pressure_systems_20200527_test3.csv'
+with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+    writer = csv.DictWriter(f, fieldnames=['date', 'center_lon', 'center_lat', 'pressure', 'contour_points'])
+    writer.writeheader()
+    writer.writerows(csv_rows)
+
+print(time.time()-start)

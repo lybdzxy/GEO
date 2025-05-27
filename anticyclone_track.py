@@ -1,80 +1,102 @@
-import xarray as xr
-import numpy as np
+import pandas as pd
 import math
 
-data_path = 'E:/GEO/test/test.nc'
-data = xr.open_dataset(data_path)
-lons = np.arange(0.25, 360, 0.25)
-lats = np.arange(-89.75, 90, 0.25)
-valid_times = data['valid_time'].values  # 获取时间序列的值
+# 定义 haversine 函数，计算两点之间的距离（单位：公里）
+def haversine(lon1, lat1, lon2, lat2):
+    lon1, lat1, lon2, lat2 = map(math.radians, [lon1, lat1, lon2, lat2])
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.asin(math.sqrt(a))
+    r = 6371  # 地球半径（公里）
+    return c * r
 
-scale_factor = 310
-max_distance = 1200
+# 读取 CSV 数据，假设包含 date, center_lon, center_lat, center_pressure 等字段
+df = pd.read_csv("output_filtered_tot.csv", usecols=['date', 'center_lon', 'center_lat', 'pressure'])
 
-# 初始化结果列表
-results = []
+# 确保 date 字段为字符串类型
+df['date'] = df['date'].astype(str)
 
-# 主循环
-for time_index in range(len(valid_times)):
-    current_time = valid_times[time_index]  # 当前时间
-    list_data = []  # 每次time循环开始时清空列表
+# 筛选北纬20°以北的点
+df_filtered = df[df['center_lat'] >= 20].copy()
 
-    for lon in lons:
-        for lat in lats:
-            # 获取当前经纬度的数据
-            test = data.sel(valid_time=current_time, longitude=lon, latitude=lat)['sp'].values
-            n = 1
-            for la in (0.25, 0, -0.25):
-                for lo in (0.25, 0, -0.25):
-                    if la == 0 and lo == 0:
-                        continue
-                    new_lon = lon + lo
-                    new_lat = lat + la
-                    beside = data.sel(valid_time=current_time, longitude=new_lon, latitude=new_lat)['sp'].values
-                    if la == 0 or lo == 0:
-                        distance = 31
-                    else:
-                        distance = 31 * math.sqrt(2)
-                    gradient = (test - beside) / distance
+# 按日期排序
+df_filtered.sort_values(by='date', inplace=True)
 
-                    if gradient <= 0.15:
-                        n = 0  # 直接赋值为0，避免乘法
+# 按日期分组
+groups = df_filtered.groupby('date')
+time_groups = {}
+for date, group in groups:
+    time_groups[date] = group.reset_index(drop=True)
 
-            if n == 1:  # 如果n仍然是1，说明符合条件
-                coor = [lon, lat, test]
-                print(coor)
-                list_data.append(coor)
+# 获取所有时刻
+time_list = sorted(time_groups.keys())
 
-    # 处理相近点合并
-    while len(list_data) > 1:
-        distances = []
-        for i in range(len(list_data)):
-            for j in range(i + 1, len(list_data)):
-                x1, y1 = list_data[i][0], list_data[i][1]
-                x2, y2 = list_data[j][0], list_data[j][1]
-                distance = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) * scale_factor
-                distances.append((distance, i, j))
+# 存储最终轨迹
+final_trajectories = []
+prev_points = dict()
+unique_id = 0
 
-        if not distances:
-            break
+# 遍历各时刻，构建轨迹
+for i, current_time in enumerate(time_list):
+    current_group = time_groups[current_time]
+    current_points = dict()
+    matched_current = set()
 
-        distances.sort(key=lambda x: x[0])
-        closest_distance, i, j = distances[0]
+    if i == 0:
+        # 初始时刻，直接为每个点分配轨迹ID
+        for idx, row in current_group.iterrows():
+            prev_points[unique_id] = [row.to_dict()]
+            unique_id += 1
+    else:
+        # 后续时刻，匹配前一时刻的点
+        for pid, traj in prev_points.items():
+            last_point = traj[-1]
+            min_dist = float('inf')
+            min_idx = None
+            for idx, row in current_group.iterrows():
+                if idx in matched_current:
+                    continue
+                dist = haversine(last_point['center_lon'], last_point['center_lat'],
+                                 row['center_lon'], row['center_lat'])
+                if dist < min_dist:
+                    min_dist = dist
+                    min_idx = idx
+            if min_idx is not None and min_dist <= 1280:
+                # 如果距离小于1280公里，延续轨迹
+                new_traj = traj + [current_group.loc[min_idx].to_dict()]
+                current_points[pid] = new_traj
+                matched_current.add(min_idx)
+            else:
+                # 如果轨迹长度>=4，保存到最终轨迹
+                if len(traj) >= 4:
+                    final_trajectories.append(traj)
+        # 处理未匹配的点，创建新轨迹
+        for idx, row in current_group.iterrows():
+            if idx not in matched_current:
+                current_points[unique_id] = [row.to_dict()]
+                unique_id += 1
+        prev_points = current_points
 
-        if closest_distance > max_distance:
-            break
+# 处理最后一时刻的轨迹
+for traj in prev_points.values():
+    if len(traj) >= 4:
+        final_trajectories.append(traj)
 
-        # 合并两个点
-        new_point = [
-            (list_data[i][0] + list_data[j][0]) / 2,
-            (list_data[i][1] + list_data[j][1]) / 2,
-            list_data[i][2]  # 选择其中一个数据值
-        ]
-        list_data[i] = new_point
-        del list_data[j]
+# 将轨迹数据写入 CSV 文件，包含中心气压
+trajectory_data = []
+for traj_id, traj in enumerate(final_trajectories):
+    for point in traj:
+        data = {
+            'trajectory_id': traj_id,
+            'date': point['date'],
+            'center_lon': point['center_lon'],
+            'center_lat': point['center_lat'],
+            'center_pressure': point['pressure']
+        }
+        trajectory_data.append(data)
 
-    # 保存结果
-    file_name = f'E:/GEO/test/anticyclone/time_{time_index}.txt'
-    with open(file_name, 'w') as f:
-        for item in list_data:
-            f.write(f"{item[0]}, {item[1]}, {item[2]}\n")
+# 创建 DataFrame 并写入 CSV
+df_trajectories = pd.DataFrame(trajectory_data)
+df_trajectories.to_csv('trajectories_with_pressure_tot.csv', index=False)
+print("轨迹数据（包含中心气压）已成功写入 'trajectories_with_pressure.csv' 文件中")

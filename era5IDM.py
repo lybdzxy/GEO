@@ -24,7 +24,7 @@ if __name__ == '__main__':
     # 数据信息字典
     dic = {
     "product_type": ["reanalysis"],
-    "variable": ["vorticity"],
+    "variable": ["mean_sea_level_pressure"],
     "day": [
         "01", "02", "03",
         "04", "05", "06",
@@ -43,14 +43,13 @@ if __name__ == '__main__':
         "09:00", "12:00", "15:00",
         "18:00", "21:00"
     ],
-    "pressure_level": ["1000"],
     "data_format": "netcdf",
     "download_format": "unarchived"
-}.values()
+}
 
-    for y in range(2000,2014):  # 遍历年
+    for y in range(2021,2022):  # 遍历年
         dic['year'] = str(y)
-        for m in range(1,13):
+        for m in range(4,13):
             dic['month'] = str(m)
 
             r = c.retrieve("reanalysis-era5-single-levels", dic, )  # 文件下载器
