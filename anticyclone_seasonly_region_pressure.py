@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 
 # 读取CSV文件
-df = pd.read_csv("trajectories_fin.csv")
+df = pd.read_csv("trajectories_fin_new.csv")
 
 # 去除列名中的引号和空格
 df.columns = df.columns.str.replace("'", "").str.strip()
@@ -81,4 +81,4 @@ print("各季节各地区的平均中心气压矩阵：")
 print(pivot_table)
 
 # 保存矩阵到CSV文件
-pivot_table.to_csv("season_region_average_pressure.csv", encoding='utf-8-sig')
+pivot_table.to_csv("season_region_average_pressure_new.csv", encoding='utf-8-sig')

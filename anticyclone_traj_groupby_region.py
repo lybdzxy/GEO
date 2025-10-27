@@ -33,6 +33,6 @@ gdf_points = gdf_points.reset_index(drop=True)
 df['region_name'] = gdf_points['region_name']
 
 # 8. 输出结果
-output_file = 'trajectories_with_season&region.csv'
+output_file = 'trajectories_with_season&region_new.csv'
 df.to_csv(output_file, index=False)
 print(f"结果已保存至 {output_file}")

@@ -9,7 +9,7 @@ plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 # 读取CSV文件（假设已有）
-df = pd.read_csv("trajectories_fin.csv")  # 修正文件名，移除®
+df = pd.read_csv("trajectories_fin_new.csv")  # 修正文件名，移除®
 
 # 打印列名检查（保持原有）
 print([repr(col) for col in df.columns])
@@ -84,7 +84,7 @@ annual_region_trajectory_count.columns = ['Year', 'Region', 'Cyclone Count']
 
 # 按地区分列输出 CSV（宽格式）
 pivot_table = annual_region_trajectory_count.pivot(index='Year', columns='Region', values='Cyclone Count').reset_index()
-pivot_table.to_csv("annual_region_trajectory_amount_pivoted.csv", index=False, encoding='utf-8-sig')
+pivot_table.to_csv("annual_region_trajectory_amount_pivoted_new.csv", index=False, encoding='utf-8-sig')
 
 # 绘制按地区折线图并显示 p 值
 plt.figure(figsize=(6.496, 4), dpi=300)
@@ -117,7 +117,7 @@ plt.legend(fontsize=9)
 plt.grid(True)
 plt.xticks(rotation=45)
 plt.tight_layout()
-plt.savefig('E:/GEO/result/anticyclone/amount_region.eps')
+plt.savefig('E:/GEO/result/anticyclone/amount_region_new.eps')
 plt.show()
 
 # 整体趋势分析
@@ -139,8 +139,8 @@ plt.legend(fontsize=9)
 plt.grid(True)
 plt.xticks(rotation=45)
 plt.tight_layout()
-plt.savefig('E:/GEO/result/anticyclone/amount_yearly.eps')
+plt.savefig('E:/GEO/result/anticyclone/amount_yearly_new.eps')
 plt.show()
 
 # 保存整体反气旋数量数据
-annual_trajectory_count.to_csv("annual_trajectory_amount.csv", index=False, encoding='utf-8-sig')
+annual_trajectory_count.to_csv("annual_trajectory_amount_new.csv", index=False, encoding='utf-8-sig')

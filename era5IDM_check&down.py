@@ -58,7 +58,7 @@ if __name__ == '__main__':
                 print(filepath,'no exist')
                 dic['month'] = str(m)
                 dic['year'] = str(y)
-                r = c.retrieve("reanalysis-era5-pressure-levels", dic, )  # 文件下载器
+                r = c.retrieve("reanalysis-era5-stream-levels", dic, )  # 文件下载器
                 # 打印 result 对象的结构以查找下载 URL
                 url = r.location  # 获取文件下载地址
                 idmDownloader(url, path, filename)  # 添加进IDM中下载'''

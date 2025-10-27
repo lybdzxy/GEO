@@ -98,7 +98,7 @@ def main():
                     req['pressure_level']=lev_batch
 
                     print(f"[下载] 批次 {idx+1}: 层 {batch_str} ...")
-                    result = c.retrieve('reanalysis-era5-pressure-levels', req, tmp_path)
+                    result = c.retrieve('reanalysis-era5-stream-levels', req, tmp_path)
                     if USE_IDM:
                         try:
                             url = result.location

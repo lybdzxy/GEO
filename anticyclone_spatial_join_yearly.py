@@ -7,8 +7,8 @@ from datetime import datetime
 poi_data = pd.read_csv("trajectories_fin.csv")
 
 # ---------- 网格设置 ----------
-lon_bins = np.arange(-180, 181, 1)
-lat_bins = np.arange(0, 91, 1)
+lon_bins = np.arange(-180, 181, 0.5)
+lat_bins = np.arange(0, 91, 0.5)
 
 # ---------- 数据预处理 ----------
 # 调整经度范围
@@ -19,7 +19,7 @@ poi_data['center_lon'] = np.where(poi_data['center_lon'] > 180, poi_data['center
 years = sorted(poi_data['year'].unique())
 
 # ---------- 初始化 NetCDF ----------
-dataset = nc.Dataset('traj_paths_1deg.nc', 'w', format='NETCDF4')
+dataset = nc.Dataset('traj_paths_05deg.nc', 'w', format='NETCDF4')
 dataset.createDimension('lon', len(lon_bins) - 1)
 dataset.createDimension('lat', len(lat_bins) - 1)
 dataset.createDimension('year', len(years))
@@ -29,8 +29,8 @@ lon_var = dataset.createVariable('lon', np.float32, ('lon',))
 lat_var = dataset.createVariable('lat', np.float32, ('lat',))
 year_var = dataset.createVariable('year', np.int32, ('year',))
 
-lon_var[:] = lon_bins[:-1] + 0.5  # 中心点
-lat_var[:] = lat_bins[:-1] + 0.5
+lon_var[:] = lon_bins[:-1] + 0.25  # 中心点
+lat_var[:] = lat_bins[:-1] + 0.25
 year_var[:] = np.array(years)
 
 # 创建路径格点计数字段

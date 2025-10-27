@@ -8,7 +8,7 @@ from palettable.colorbrewer.qualitative import Set1_5  # 导入Set1_5配色方�
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 # 读取CSV文件
-df = pd.read_csv("trajectories_fin.csv")
+df = pd.read_csv("trajectories_fin_new.csv")
 df.columns = df.columns.str.replace("'", "").str.strip()
 
 # 创建日期列（假设原数据有 'year' 和 'month' 列）
@@ -73,7 +73,7 @@ annual_region_trajectory_count = df.groupby(['Adjusted_Year', 'region_name'])['c
 annual_region_trajectory_count.columns = ['Year', 'Region', 'Average Pressure']
 # 按地区分列输出 CSV（宽格式）
 pivot_table = annual_region_trajectory_count.pivot(index='Year', columns='Region', values='Average Pressure').reset_index()
-pivot_table.to_csv("annual_region_trajectory_pressure_pivoted.csv", index=False, encoding='utf-8-sig')
+pivot_table.to_csv("annual_region_trajectory_pressure_pivoted_new.csv", index=False, encoding='utf-8-sig')
 # 创建一个图形，绘制整体折线
 plt.figure(figsize=(6.496, 4), dpi=300)
 regions = annual_region_trajectory_count['Region'].unique()
@@ -102,7 +102,7 @@ plt.legend(fontsize=9)
 plt.grid(True)
 plt.xticks(rotation=45)
 plt.tight_layout()
-plt.savefig('E:/GEO/result/anticyclone/pressure_region.eps')
+plt.savefig('E:/GEO/result/anticyclone/pressure_region_new.eps')
 plt.show()
 
 # 整体趋势分析
@@ -124,8 +124,8 @@ plt.legend(fontsize=9)
 plt.grid(True)
 plt.xticks(rotation=45)
 plt.tight_layout()
-plt.savefig('E:/GEO/result/anticyclone/pressure_yearly.eps')
+plt.savefig('E:/GEO/result/anticyclone/pressure_yearly_new.eps')
 plt.show()
 
 # 保存整体反气旋数量数据
-annual_trajectory_count.to_csv("annual_trajectory_pressure.csv", index=False, encoding='utf-8-sig')
+annual_trajectory_count.to_csv("annual_trajectory_pressure_new.csv", index=False, encoding='utf-8-sig')

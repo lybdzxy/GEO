@@ -1,79 +1,107 @@
-import pandas as pd
+import xarray as xr
+from xinvert import invert_Poisson
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import cartopy.crs as ccrs
-import cartopy.feature as cfeature
-import matplotlib.colors as mcolors
-from cartopy.mpl.geoaxes import GeoAxes
-import matplotlib.path as mpath
+import os
+from concurrent.futures import ProcessPoolExecutor
+from tqdm import tqdm
+import warnings
+from contextlib import redirect_stdout
 
-plt.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
-plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
-plt.rcParams['font.size'] = 16
-nums = [1,8,10]
-for n in nums:
-    if n == 1:
-        name = '成熟'
-    elif n == 8:
-        name = '生成'
+# 忽略非关键警告
+warnings.filterwarnings("ignore")
+
+hour = [0, 6, 12, 18]
+
+def chunk_list(lst, chunk_size):
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+def process_time_step_chunk(times, vo_data, iParams, time_dim, area):
+    """处理一组时间步的流函数计算，重定向invert_Poisson的输出到日志"""
+    results = []
+    for t in times:
+        if t is not None:
+            with open(os.devnull, 'w') as fnull:
+                with redirect_stdout(fnull):  # 抑制invert_Poisson的控制台输出
+                    vo = vo_data.sel({time_dim: t})
+                    # 修正涡度，确保全球积分 = 0，直接修改 vo
+                    vo -= (vo * area).sum() / area.sum()
+                    # 计算流函数
+                    sf = invert_Poisson(vo, dims=['latitude', 'longitude'], iParams=iParams)
+                    # 去流函数均值，使正负值对称
+                    sf = sf.expand_dims({time_dim: [t]})
+                    results.append(sf)
+                    # 清理临时变量
+                    del vo, sf
+    return results
+
+def process_month(year, month, hour):
+    """处理指定年月的全部时间步"""
+    out_path = f"F:/ERA5/hourly/lvl/stream/ERA5_stream_850hpa_{year}{month:02d}.nc"
+    if os.path.exists(out_path):
+        print(f"已存在: {out_path}，跳过")
+        return
+
+    all_sf = []
+    for h in hour:
+        data_path = f'F:/ERA5/hourly/lvl/{h}z/ERA5_{h}z_lvl_{year}{month:02d}.nc'
+        if not os.path.exists(data_path):
+            print(f"缺少文件: {data_path}")
+            continue
+
+        # 使用with语句确保数据集关闭
+        with xr.open_dataset(data_path) as ds:
+            ds = ds.sortby('latitude')
+            lat = ds['latitude']
+            lon = ds['longitude']
+            time_dim = 'time' if 'time' in ds.dims else 'valid_time'
+            level_dim = 'level' if 'level' in ds.dims else 'pressure_level'
+
+            # 计算面积权重（仅一次）
+            area = np.cos(np.deg2rad(lat))  # 1D: [latitude]
+            area = area.expand_dims(longitude=lon)  # 扩展为 2D: [latitude, longitude]
+
+            # 反演参数（保持原设置）
+            iParams = {
+                'BCs': ['extend', 'periodic'],
+                'mxLoop': 1000,
+                'tolerance': 1e-6,
+            }
+
+            # 选择1000 hPa的涡度数据
+            vo_data = ds['vo'].sel({level_dim: 850})
+
+            # 使用进程池并限制最大进程数
+            with ProcessPoolExecutor(max_workers=16) as executor:
+                time_chunks = chunk_list(ds[time_dim].values, chunk_size=5)
+                futures = [
+                    executor.submit(process_time_step_chunk, chunk, vo_data, iParams, time_dim, area)
+                    for chunk in time_chunks
+                ]
+                # 使用tqdm显示该小时的进度
+                all_sf.extend([sf for future in futures for sf in future.result()])
+
+    # 如果该月有数据，合并并保存
+    if all_sf:
+        sf_data = xr.concat(all_sf, dim=time_dim).sortby(time_dim)
+        sf_data.name = 'streamfunction'
+        sf_data.attrs = {
+            'units': 'm^2 s^-1',
+            'long_name': f'Streamfunction at 850 hPa'
+        }
+
+        ds_out = xr.Dataset({'streamfunction': sf_data})
+        ds_out.attrs = {
+            'Conventions': 'CF-1.7',
+            'source': f'Calculated from ERA5 vo at 850 hPa using xinvert',
+            'history': f'Created on {np.datetime_as_string(np.datetime64("now"), unit="s")}'
+        }
+
+        ds_out.to_netcdf(out_path)
     else:
-        name = '消亡'
-    # 读取 CSV 文件（假设文件名为 data.csv）
-    df = pd.read_csv("trajectory_statistics_fin.csv")
+        print(f"⚠️ {year}-{month:02d} 没有数据，跳过")
 
-    filtered_data = df
-    # 提取经纬度数据
-    lons = filtered_data.iloc[:, n].values  # 假设经度在第二列
-    lats = filtered_data.iloc[:, n+1].values  # 假设纬度在第三列
-    ids = filtered_data.iloc[:, 0].values  # 假设轨迹ID在第一列
-
-    # 创建投影转换器
-    proj = ccrs.NorthPolarStereo()
-    pc = ccrs.PlateCarree()
-
-    # 将经纬度转换为 NorthPolarStereo 投影坐标
-    x, y = proj.transform_points(pc, np.array(lons), np.array(lats))[:, :2].T
-
-    # 创建极地投影绘图
-    fig, ax = plt.subplots(figsize=(8, 8), subplot_kw={'projection': proj})
-
-    # 添加地图特征
-    ax.set_extent([-180, 180, 20, 90], crs=ccrs.PlateCarree())  # 只显示北纬 30° 及以上
-    ax.add_feature(cfeature.LAND, facecolor='lightgray')
-    ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
-
-    # 绘制热点图（在转换后的坐标上）
-    hb = sns.kdeplot(x=x, y=y, alpha=0.6, levels=20, cmap="Reds", ax=ax, fill=True)
-
-    # 获取热点图数据的最小值和最大值
-    min_val = np.min(hb.collections[0].get_array())
-    max_val = np.max(hb.collections[0].get_array())
-
-    # 创建一个 ScalarMappable 对象
-    sm = plt.cm.ScalarMappable(cmap="Reds", norm=plt.Normalize(vmin=min_val, vmax=max_val))
-
-    '''# 绘制颜色条
-    cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', pad=0.05)
-    cbar.set_label('核密度')
-    '''
-    # 添加网格和标题
-    ax.gridlines(color='C7', lw=1, ls=':', draw_labels=True, rotate_labels=False, ylocs=[40, 60, 80])
-
-    # 添加经纬网及标注
-    def polarCentral_set_latlim(lat_lims, ax):
-        ax.set_extent([-180, 180, lat_lims[0], lat_lims[1]], ccrs.PlateCarree())
-        theta = np.linspace(0, 2 * np.pi, 100)
-        center, radius = [0.5, 0.5], 0.5
-        verts = np.vstack([np.sin(theta), np.cos(theta)]).T
-        circle = mpath.Path(verts * radius + center)
-        ax.set_boundary(circle, transform=ax.transAxes)
-
-    # 设置绘制区域范围
-    polarCentral_set_latlim((20, 90), ax)
-
-    # 设置标题
-    # ax.set_title(f"北半球温带反气旋{name}点核密度空间分布图", fontsize=14)
-    plt.savefig(f'E:/GEO/result/anticyclone/{name}_kde.png',dpi=600)
-    # 显示图形
-    plt.show()
+if __name__ == '__main__':
+    # 主循环，使用tqdm显示年月进度
+    year_month = [(year, month) for year in range(2023, 2024) for month in range(1, 13)]
+    for year, month in tqdm(year_month, desc="处理年月"):
+        process_month(year, month, hour)

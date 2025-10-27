@@ -10,6 +10,13 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="\Mediterranean Region_trajectories_stat.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="\annual_region_trajectory_amount_pivoted.csv">
           <value>
             <Attribute>
@@ -25,6 +32,41 @@
           </value>
         </entry>
         <entry key="\annual_trajectory_amount.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\download_missing_sfc_urls.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\download_missing_urls.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\download_missing_urls_2.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\download_urls.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\download_urls_2.csv">
           <value>
             <Attribute>
               <option name="separator" value="," />
@@ -53,6 +95,20 @@
           </value>
         </entry>
         <entry key="\k-means_result_fin.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\potential_high_pressure_centers_stream_850hpa_0360_hemispheres.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\test.csv">
           <value>
             <Attribute>
               <option name="separator" value="," />

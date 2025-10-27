@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 
 # 读取CSV文件
-df = pd.read_csv("trajectories_fin.csv")
+df = pd.read_csv("trajectories_fin_new.csv")
 
 # 创建日期列
 df['Date'] = pd.to_datetime(df[['year', 'month']].assign(DAY=1))
@@ -78,4 +78,4 @@ print("各季节各地区的平均反气旋数量矩阵：")
 print(pivot_table)
 
 # 保存矩阵到CSV文件
-pivot_table.to_csv("season_region_average_cyclone_count.csv", encoding='utf-8-sig')
+pivot_table.to_csv("season_region_average_cyclone_count_new.csv", encoding='utf-8-sig')

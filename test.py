@@ -1,156 +1,182 @@
+import xarray as xr
 import numpy as np
+import cupy as cp
 import pandas as pd
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
-from sklearn.preprocessing import StandardScaler
-from collections import Counter
+import concurrent.futures
+import os
+from tqdm import tqdm
 
-# 读取CSV文件
-data_path = 'E:/GEO/pyproject/trajectory_statistics.csv'
-data = pd.read_csv(data_path)
+# 经度处理函数
+def wrap_longitude(pressure_lon, lon_array, delta_phi):
+    """处理经度0°/360°跳跃，返回子网格经度、掩码和索引（15列）"""
+    half_width = 7 * delta_phi  # 调整为15列（中间3列+东西各6列）
+    lon_min = (pressure_lon - half_width) % 360
+    lon_max = (pressure_lon + half_width) % 360
+    mask = (lon_array >= lon_min) & (lon_array <= lon_max) if lon_min <= lon_max else \
+        (lon_array >= lon_min) | (lon_array <= lon_max)
+    lon_indices = np.where(mask)[0]
+    lon_sub = lon_array[lon_indices]
+    angles = ((lon_sub - pressure_lon + 180) % 360 - 180)
+    sort_idx = np.argsort(angles)
+    lon_sub, lon_indices = lon_sub[sort_idx], lon_indices[sort_idx]
 
-# 选择 Y_bar < 70 的数据
-filtered_data = data[data.iloc[:, 2] < 70]
+    if len(lon_sub) > 15:  # 限制为15列
+        center_idx = len(lon_sub) // 2
+        start_idx = max(0, center_idx - 7)  # 调整为7（3中间+6西侧）
+        end_idx = min(len(lon_sub), center_idx + 8)  # 调整为8（3中间+6东侧，+1因为切片不包含end）
+        lon_sub, lon_indices = lon_sub[start_idx:end_idx], lon_indices[start_idx:end_idx]
+    return lon_sub, mask, lon_indices
 
-# 第一次聚类：对第二列和第三列进行聚类
-data_for_first_clustering = filtered_data.iloc[:, 4:6].values
+# 处理单个中心的函数
+def process_center(target_date, pressure_lon, pressure_lat, df_subset, lat, lon, delta_phi, thickness, time_dim, use_gpu=True):
+    try:
+        time = f"{str(target_date)[:4]}-{str(target_date)[4:6]}-{str(target_date)[6:8]} {str(target_date)[8:10]}:00"
 
-# 标准化数据
-scaler_first = StandardScaler()
-data_for_first_clustering_scaled = scaler_first.fit_transform(data_for_first_clustering)
+        # 提取 thickness 数据，使用动态的 time_dim
+        thickness_t = thickness.sel({time_dim: time})
 
-# 定义聚类数量的范围
-min_clusters = 2
-max_clusters = 10
+        # 反转纬度
+        if lat[0] > lat[-1]:
+            lat = lat[::-1]
+            thickness_t = thickness_t[::-1, :]
 
-# 初始化存储指标的列表
-sse = []
-silhouette_scores = []
-db_scores = []
-ch_scores = []
+        # 纬度范围（3行）
+        center_lat_idx = np.argmin(np.abs(lat - pressure_lat))
+        lat_start_idx = max(0, center_lat_idx - 1)
+        lat_end_idx = min(len(lat), center_lat_idx + 2)
+        lat_sub = lat[lat_start_idx:lat_end_idx]
 
-# 循环尝试不同的聚类数量
-for n_clusters in range(min_clusters, max_clusters + 1):
-    # 使用KMeans算法进行聚类
-    kmeans = KMeans(n_clusters=n_clusters, random_state=100)
-    kmeans.fit(data_for_first_clustering_scaled)
+        # 经度范围（15列）
+        lon_sub, _, lon_indices = wrap_longitude(pressure_lon, lon, delta_phi)
+        thickness_sub = thickness_t.isel(latitude=slice(lat_start_idx, lat_end_idx)).values[:, lon_indices]
 
-    # 计算总误差平方和（SSE）
-    sse.append(kmeans.inertia_)
+        # 反转纬度子网格
+        if lat_sub[0] > lat_sub[-1]:
+            lat_sub = lat_sub[::-1]
+            thickness_sub = thickness_sub[::-1, :]
 
-    # 获取聚类结果的标签
-    labels = kmeans.labels_
+        if thickness_sub.size == 0 or thickness_sub.shape != (3, 15):  # 更新为15列
+            return None
 
-    # 计算轮廓系数
-    silhouette_avg = silhouette_score(data_for_first_clustering_scaled, labels)
-    silhouette_scores.append(silhouette_avg)
+        # 使用 CuPy 加速
+        array_mod = cp if use_gpu else np
+        thickness_sub = array_mod.array(thickness_sub)
 
-    # 计算Davies-Bouldin指数
-    db_index = davies_bouldin_score(data_for_first_clustering_scaled, labels)
-    db_scores.append(db_index)
+        # 中心3x3网格均值
+        center_lat_idx = np.argmin(np.abs(lat_sub - pressure_lat))
+        center_lon_idx = np.argmin(np.abs(lon_sub - pressure_lon))
+        center_start_lat = max(0, center_lat_idx - 1)
+        center_end_lat = min(3, center_lat_idx + 2)
+        center_start_lon = max(0, center_lon_idx - 1)
+        center_end_lon = min(15, center_lon_idx + 2)  # 更新为15列
+        center_mean = array_mod.mean(thickness_sub[center_start_lat:center_end_lat, center_start_lon:center_end_lon])
 
-    # 计算Calinski-Harabasz指数
-    ch_index = calinski_harabasz_score(data_for_first_clustering_scaled, labels)
-    ch_scores.append(ch_index)
+        # 西侧和东侧均值（各6列）
+        west_mean = array_mod.mean(thickness_sub[center_start_lat:center_end_lat, 0:6])  # 西侧6列
+        east_mean = array_mod.mean(thickness_sub[center_start_lat:center_end_lat, -6:])  # 东侧6列
+        total_mean = (west_mean + east_mean) / 2
+        ratio = center_mean / total_mean
+        # 判定冷热
+        system_type = 'c' if center_mean < total_mean else 'w'
 
-# 确定最佳聚类数
-best_n_clusters = {
-    'SSE': np.argmin(sse) + min_clusters,
-    '轮廓系数': np.argmax(silhouette_scores) + min_clusters,
-    'Davies-Bouldin指数': np.argmin(db_scores) + min_clusters,
-    'Calinski-Harabasz指数': np.argmax(ch_scores) + min_clusters
-}
+        # 获取结果
+        result_row = df_subset[(df_subset['date'] == target_date) &
+                              (df_subset['pressure_lon'] == pressure_lon) &
+                              (df_subset['pressure_lat'] == pressure_lat)].copy()
+        result_row['system_type'] = system_type
+        result_row['ratio'] = ratio
+        return result_row
+    except Exception as e:
+        print(f"Error processing center {target_date}, {pressure_lon}, {pressure_lat}: {e}")
+        return None
 
-print(f"基于SSE的最佳聚类数: {best_n_clusters['SSE']}")
-print(f"基于轮廓系数的最佳聚类数: {best_n_clusters['轮廓系数']}")
-print(f"基于Davies-Bouldin指数的最佳聚类数: {best_n_clusters['Davies-Bouldin指数']}")
-print(f"基于Calinski-Harabasz指数的最佳聚类数: {best_n_clusters['Calinski-Harabasz指数']}")
+# 处理单个 NetCDF 文件的函数
+def process_file(year, month, hour, dates, df, use_gpu=True, max_workers=12):
+    data_path = f'F:/ERA5/hourly/lvl/{int(hour)}z/ERA5_{int(hour)}z_lvl_{year}{month}.nc'
+    if not os.path.exists(data_path):
+        print(f"File not found: {data_path}")
+        return []
 
-# 综合考虑多个指标，选择最佳聚类数
-# 这里采用简单的投票机制，选择出现次数最多的聚类数
-best_cluster_count = Counter(best_n_clusters.values()).most_common(1)[0][0]
-print(f"综合考虑多个指标，选择的最佳聚类数: {best_cluster_count}")
+    try:
+        # 加载 NetCDF 文件
+        ds = xr.open_dataset(data_path, chunks={'time': 1})  # 使用 Dask 懒加载
+        lat, lon = ds['latitude'].values, ds['longitude'].values
+        delta_phi = np.abs(lat[1] - lat[0])
 
-# 使用最佳聚类数进行第一次聚类
-final_kmeans_first = KMeans(n_clusters=best_cluster_count, random_state=100)
-filtered_data["cluster_first"] = final_kmeans_first.fit_predict(data_for_first_clustering_scaled)
+        # 计算 thickness（批量），使用动态的 time_dim 和 level_dim
+        time_dim = 'time' if 'time' in ds.dims else 'valid_time'
+        level_dim = 'level' if 'level' in ds.dims else 'pressure_level'
+        z500 = ds['z'].sel({level_dim: 500}).compute()  # 强制计算以释放内存
+        z1000 = ds['z'].sel({level_dim: 1000}).compute()
+        thickness = z500 - z1000
 
-# 第二次聚类：在第一次聚类结果基础上，对第四至第八列进行聚类
-min_clusters_second = 2
-max_clusters_second = 10
+        # 过滤 df，仅传递与当前 dates 相关的子集
+        df_subset = df[df['date'].isin(dates)].copy()
 
-# 获取第一次聚类的唯一簇标签
-unique_clusters_first = filtered_data["cluster_first"].unique()
+        # 计算该文件中的总中心点数
+        total_centers = len(df_subset[['pressure_lon', 'pressure_lat']].drop_duplicates())
 
-# 创建一个空的列表，用于存储第二次聚类的结果
-second_cluster_labels = []
+        # 使用 ProcessPoolExecutor 并行处理，并添加进度条
+        results = []
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    process_center, target_date, pressure_lon, pressure_lat, df_subset, lat, lon, delta_phi, thickness, time_dim, use_gpu
+                ): (target_date, pressure_lon, pressure_lat)
+                for target_date in dates
+                for pressure_lon, pressure_lat in df_subset[df_subset['date'] == target_date][['pressure_lon', 'pressure_lat']].values
+            }
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    results.append(result)
 
-# 遍历每个第一次聚类的簇
-for cluster in unique_clusters_first:
-    # 获取属于当前簇的数据
-    cluster_data = filtered_data[filtered_data["cluster_first"] == cluster]
-    data_for_second_clustering = cluster_data.iloc[:, [1, 2, 6, 7]].values
+        ds.close()
+        return results
+    except Exception as e:
+        print(f"Error processing file {data_path}: {e}")
+        ds.close()
+        return []
 
-    # 标准化数据
-    scaler_second = StandardScaler()
-    data_for_second_clustering_scaled = scaler_second.fit_transform(data_for_second_clustering)
+# 主函数
+def main():
+    # 读取 CSV 文件
+    csv_path = 'confirmed_high_pressure_centers_850hPa_zs.csv'
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"Error reading CSV {csv_path}: {e}")
+        return
 
-    # 初始化存储指标的列表
-    sse_second = []
-    silhouette_scores_second = []
-    db_scores_second = []
-    ch_scores_second = []
+    if df.empty:
+        print("CSV file is empty.")
+        return
 
-    # 循环尝试不同的聚类数量
-    for n_clusters in range(min_clusters_second, max_clusters_second + 1):
-        # 使用KMeans算法进行聚类
-        kmeans_second = KMeans(n_clusters=n_clusters, random_state=100)
-        kmeans_second.fit(data_for_second_clustering_scaled)
+    # 按年、月、小时分组
+    df['year'] = df['date'].astype(str).str[:4]
+    df['month'] = df['date'].astype(str).str[4:6]
+    df['hour'] = df['date'].astype(str).str[8:10]
+    grouped = df.groupby(['year', 'month', 'hour'])['date'].unique().reset_index()
 
-        # 计算总误差平方和（SSE）
-        sse_second.append(kmeans_second.inertia_)
+    # 使用 ProcessPoolExecutor 并行处理文件，并添加进度条
+    results = []
+    with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:  # 限制主进程数
+        futures = {
+            executor.submit(process_file, row['year'], row['month'], row['hour'], row['date'], df): f"{row['year']}-{row['month']}-{row['hour']}"
+            for _, row in grouped.iterrows()
+        }
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures),
+                           desc="Processing NetCDF files"):
+            result = future.result()
+            results.extend(result)
 
-        # 获取聚类结果的标签
-        labels_second = kmeans_second.labels_
+    # 合并结果并保存
+    if results:
+        result_df = pd.concat(results, ignore_index=True)
+        result_df.to_csv('confirmed_anticyclone_centers_850hpa_zs_cw_636.csv', index=False)
+        print("Results saved to confirmed_anticyclone_centers_850hpa_zs_cw.csv")
+    else:
+        print("No results to save.")
 
-        # 计算轮廓系数
-        silhouette_avg_second = silhouette_score(data_for_second_clustering_scaled, labels_second)
-        silhouette_scores_second.append(silhouette_avg_second)
-
-        # 计算Davies-Bouldin指数
-        db_index_second = davies_bouldin_score(data_for_second_clustering_scaled, labels_second)
-        db_scores_second.append(db_index_second)
-
-        # 计算Calinski-Harabasz指数
-        ch_index_second = calinski_harabasz_score(data_for_second_clustering_scaled, labels_second)
-        ch_scores_second.append(ch_index_second)
-
-    # 确定最佳聚类数
-    best_n_clusters_second = {
-        'SSE': np.argmin(sse_second) + min_clusters_second,
-        '轮廓系数': np.argmax(silhouette_scores_second) + min_clusters_second,
-        'Davies-Bouldin指数': np.argmin(db_scores_second) + min_clusters_second,
-        'Calinski-Harabasz指数': np.argmax(ch_scores_second) + min_clusters_second
-    }
-
-    print(f"簇 {cluster} - 基于SSE的最佳聚类数: {best_n_clusters_second['SSE']}")
-    print(f"簇 {cluster} - 基于轮廓系数的最佳聚类数: {best_n_clusters_second['轮廓系数']}")
-    print(f"簇 {cluster} - 基于Davies-Bouldin指数的最佳聚类数: {best_n_clusters_second['Davies-Bouldin指数']}")
-    print(f"簇 {cluster} - 基于Calinski-Harabasz指数的最佳聚类数: {best_n_clusters_second['Calinski-Harabasz指数']}")
-
-    # 综合考虑多个指标，选择最佳聚类数
-    best_cluster_count_second = Counter(best_n_clusters_second.values()).most_common(1)[0][0]
-    print(f"簇 {cluster} - 综合考虑多个指标，选择的最佳聚类数: {best_cluster_count_second}")
-
-    # 使用最佳聚类数进行第二次聚类
-    final_kmeans_second = KMeans(n_clusters=best_cluster_count_second, random_state=100)
-    second_labels = final_kmeans_second.fit_predict(data_for_second_clustering_scaled)
-
-    # 将第二次聚类的标签添加到列表中
-    second_cluster_labels.extend(second_labels)
-
-# 将第二次聚类的结果添加到原始数据中
-filtered_data["cluster_second"] = second_cluster_labels
-
-# 将结果保存到新的CSV文件
-filtered_data.to_csv('E:/GEO/pyproject/k-means_multi.csv', index=False)
+if __name__ == '__main__':
+    main()

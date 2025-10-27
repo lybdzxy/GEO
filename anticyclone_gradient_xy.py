@@ -110,7 +110,7 @@ valid_points = list(zip(valid_lats, valid_lons, valid_pressures.tolist()))
 # Convert valid_points to a NumPy array
 valid_points = np.array(valid_points)
 
-# Filter out points with pressure less than 101000
+# Filter out points with stream less than 101000
 valid_points = valid_points[valid_points[:, 2] >= 102000]
 
 valid_points_coor = valid_points[:, :2]

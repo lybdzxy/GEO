@@ -12,7 +12,7 @@ def haversine(lon1, lat1, lon2, lat2):
     return c * r
 
 # 读取 CSV 数据，假设包含 date, center_lon, center_lat, center_pressure 等字段
-df = pd.read_csv("output_filtered_tot.csv", usecols=['date', 'center_lon', 'center_lat', 'pressure'])
+df = pd.read_csv("output_filtered_tot.csv", usecols=['date', 'center_lon', 'center_lat', 'stream'])
 
 # 确保 date 字段为字符串类型
 df['date'] = df['date'].astype(str)
@@ -92,7 +92,7 @@ for traj_id, traj in enumerate(final_trajectories):
             'date': point['date'],
             'center_lon': point['center_lon'],
             'center_lat': point['center_lat'],
-            'center_pressure': point['pressure']
+            'center_pressure': point['stream']
         }
         trajectory_data.append(data)
 

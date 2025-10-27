@@ -1,11 +1,90 @@
-import pandas as pd
+import cdsapi
 
-df1 = pd.read_csv('high_pressure_systems00_24.csv')
-df2 = pd.read_csv('high_pressure_systems7000.csv')
-df3 = pd.read_csv('high_pressure_systems6070.csv')
-df4 = pd.read_csv('high_pressure_systems_1987112612.csv')
+dataset = 'reanalysis-era5-single-levels-monthly-means'
+request = {
+    "product_type": ['monthly_averaged_reanalysis'],
+    "variable": [
+        "10m_u_component_of_wind",
+        "10m_v_component_of_wind",
+        "2m_dewpoint_temperature",
+        "2m_temperature",
+        "mean_sea_level_pressure",
+        "mean_wave_period",
+        "sea_surface_temperature",
+        "surface_pressure",
+        "total_precipitation",
+        "mean_convective_precipitation_rate",
+        "mean_evaporation_rate",
+        "mean_large_scale_precipitation_rate",
+        "mean_top_downward_short_wave_radiation_flux",
+        "mean_top_net_long_wave_radiation_flux",
+        "mean_top_net_long_wave_radiation_flux_clear_sky",
+        "mean_top_net_short_wave_radiation_flux",
+        "mean_top_net_short_wave_radiation_flux_clear_sky",
+        "mean_total_precipitation_rate",
+        "instantaneous_surface_sensible_heat_flux",
+        "surface_latent_heat_flux",
+        "surface_net_solar_radiation",
+        "surface_net_solar_radiation_clear_sky",
+        "surface_net_thermal_radiation",
+        "surface_net_thermal_radiation_clear_sky",
+        "surface_sensible_heat_flux",
+        "surface_solar_radiation_downward_clear_sky",
+        "surface_solar_radiation_downwards",
+        "surface_thermal_radiation_downward_clear_sky",
+        "surface_thermal_radiation_downwards",
+        "toa_incident_solar_radiation",
+        "top_net_solar_radiation",
+        "top_net_solar_radiation_clear_sky",
+        "top_net_thermal_radiation",
+        "top_net_thermal_radiation_clear_sky",
+        "total_sky_direct_solar_radiation_at_surface",
+        "cloud_base_height",
+        "high_cloud_cover",
+        "low_cloud_cover",
+        "medium_cloud_cover",
+        "total_cloud_cover",
+        "evaporation",
+        "convective_precipitation",
+        "convective_rain_rate",
+        "large_scale_rain_rate",
+        "large_scale_precipitation",
+        "precipitation_type",
+        "total_column_rain_water",
+        "boundary_layer_height",
+        "convective_available_potential_energy",
+        "convective_inhibition",
+        "geopotential",
+        "total_column_water_vapour",
+        "total_totals_index"
+    ],
+    "year": ["1940"],
+    'month': [
+        '01', '02', '03',
+        '04', '05', '06',
+        '07', '08', '09',
+        '10', '11', '12'
+    ],
+    "day": [
+        "01", "02", "03",
+        "04", "05", "06",
+        "07", "08", "09",
+        "10", "11", "12",
+        "13", "14", "15",
+        "16", "17", "18",
+        "19", "20", "21",
+        "22", "23", "24",
+        "25", "26", "27",
+        "28", "29", "30",
+        "31"
+    ],
+    "time": ["00:00"],
+    "data_format": "netcdf",
+    "download_format": "unarchived",
+    "grid":"1.5/1.5"
+}
 
-df_combined = pd.concat([df1, df2, df3, df4], ignore_index=True)
-
-df_combined.to_csv('high_pressure_systems6024.csv', index=False)
-
+client = cdsapi.Client()
+result = client.retrieve(dataset, request)
+download_url = result.location
+print(download_url)

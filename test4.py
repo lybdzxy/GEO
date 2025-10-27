@@ -1,99 +1,103 @@
 import pandas as pd
+import geopandas as gpd
+from shapely.geometry import Point
 import numpy as np
-import netCDF4 as nc
-from datetime import datetime
 
-# ---------- 读取数据 ----------
-poi_data = pd.read_csv("trajectories_fin.csv")
+# 1. 读取 CSV 文件（输入文件使用制表符分隔）
+csv_file = 'trajectories_filtered_season.csv'
+df = pd.read_csv(csv_file)
+df.columns = df.columns.str.strip()  # 清除列名中的前后空格
 
-# ---------- 网格设置 ----------
-# 2.5°网格
-lon_bins_2_5 = np.arange(-180, 181, 2.5)
-lat_bins_2_5 = np.arange(0, 91, 2.5)
+# 调试步骤 1：验证点坐标有效性
+print("调试步骤 1：检查点坐标有效性")
+print(f"经度范围：{df['center_lon'].min()} 至 {df['center_lon'].max()}")
+print(f"纬度范围：{df['center_lat'].min()} 至 {df['center_lat'].max()}")
+if not df['center_lon'].between(-180, 180).all():
+    print("警告：存在无效经度值（应在 -180 至 180 之间）")
+if not df['center_lat'].between(-90, 90).all():
+    print("警告：存在无效纬度值（应在 -90 至 90 之间）")
+if df[['center_lon', 'center_lat']].isna().any().any():
+    print("警告：点坐标中存在 NaN 值")
+# 调整经度（如果需要）
+df['center_lon'] = df['center_lon'].apply(lambda x: x - 360 if x > 180 else x)
 
-# 5°网格
-lon_bins_5 = np.arange(-180, 181, 5)
-lat_bins_5 = np.arange(0, 91, 5)
+# 2. 加载 Shapefile 边界数据
+shapefile_path = 'E:/GEO/geodata/World_Geographic_Regions/World_Geographic_Regionst.shp'  # 修正可能的拼写错误
+gdf_boundaries = gpd.read_file(shapefile_path)
 
-# 选择网格分辨率
-grid_resolution = "5"  # 选择网格分辨率: "2.5" 或 "5"
-if grid_resolution == "2.5":
-    lon_bins = lon_bins_2_5
-    lat_bins = lat_bins_2_5
-elif grid_resolution == "5":
-    lon_bins = lon_bins_5
-    lat_bins = lat_bins_5
+# 调试步骤 2：检查 Shapefile 的 CRS 和列
+print("\n调试步骤 2：检查 Shapefile 的 CRS 和列")
+print(f"Shapefile CRS: {gdf_boundaries.crs}")
+print(f"Shapefile 列: {gdf_boundaries.columns.tolist()}")
+print(f"前几个 Region 值:\n{gdf_boundaries['Region'].head()}")
 
-# ---------- 数据预处理 ----------
-# 调整经度范围
-poi_data['center_lon'] = np.where(poi_data['center_lon'] > 180, poi_data['center_lon'] - 360, poi_data['center_lon'])
+# 调试步骤 3：检查无效几何
+print("\n调试步骤 3：检查 Shapefile 中无效几何")
+invalid_geometries = gdf_boundaries[~gdf_boundaries.geometry.is_valid]
+if not invalid_geometries.empty:
+    print(f"警告：发现 {len(invalid_geometries)} 个无效几何")
+    print(invalid_geometries[['Region', 'geometry']])
+    # 尝试修复无效几何
+'''    gdf_boundaries['geometry'] = gdf_boundaries.geometry.buffer(0)
+    print(f"已尝试修复无效几何，重新检查: {gdf_boundaries.is_valid.all()}")'''
 
-# 提取年份
-years = sorted(poi_data['year'].unique())
+# 3. 创建点数据的 GeoDataFrame
+geometry = [Point(lon, lat) for lon, lat in zip(df['center_lon'], df['center_lat'])]
+gdf_points = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:4326")
 
-# ---------- 初始化 NetCDF ----------
-dataset = nc.Dataset(f'traj_paths_{grid_resolution}deg.nc', 'w', format='NETCDF4')
-dataset.createDimension('lon', len(lon_bins) - 1)
-dataset.createDimension('lat', len(lat_bins) - 1)
-dataset.createDimension('year', len(years))
+# 4. 确保 CRS 一致
+print("\n调试步骤 4：确保 CRS 一致")
+if gdf_boundaries.crs != gdf_points.crs:
+    print(f"Shapefile CRS ({gdf_boundaries.crs}) 与点数据 CRS ({gdf_points.crs}) 不一致，正在转换")
+    gdf_boundaries = gdf_boundaries.to_crs(gdf_points.crs)
+    print(f"转换后 Shapefile CRS: {gdf_boundaries.crs}")
 
-# 经纬度和年份变量
-lon_var = dataset.createVariable('lon', np.float32, ('lon',))
-lat_var = dataset.createVariable('lat', np.float32, ('lat',))
-year_var = dataset.createVariable('year', np.int32, ('year',))
+# 5. 执行空间连接
+gdf_points = gpd.sjoin(gdf_points, gdf_boundaries, how='left', predicate='within')
 
-lon_var[:] = lon_bins[:-1] + (lon_bins[1] - lon_bins[0]) / 2  # 设置网格中心点
-lat_var[:] = lat_bins[:-1] + (lat_bins[1] - lat_bins[0]) / 2
-year_var[:] = np.array(years)
+# 调试步骤 5：检查重复分配
+print("\n调试步骤 5：检查空间连接后的重复分配")
+duplicates = gdf_points.index.duplicated().sum()
+if duplicates > 0:
+    print(f"警告：发现 {duplicates} 个点被分配到多个区域")
+    # 处理重复：保留第一个匹配
+    gdf_points = gdf_points[~gdf_points.index.duplicated(keep='first')]
+    print("已保留第一个匹配区域")
 
-# 创建路径格点计数字段
-traj_path_count = dataset.createVariable('traj_path', np.int32, ('year', 'lat', 'lon'))
-path_count_data = np.zeros((len(years), len(lat_bins) - 1, len(lon_bins) - 1), dtype=int)
+# 6. 处理区域名称
+print("\n调试步骤 6：检查区域列格式")
+if 'Region' in gdf_points.columns:
+    gdf_points['region_name'] = gdf_points['Region'].str.split(',').str[0]
+    print(f"前几个 region_name 值:\n{gdf_points['region_name'].head()}")
+else:
+    print("错误：空间连接后未找到 'Region' 列，请检查 Shapefile 列名")
+    print(f"可用列: {gdf_points.columns.tolist()}")
+    exit()
 
-# ---------- 轨迹处理 ----------
-for traj_id, group in poi_data.groupby('trajectory_id'):
-    group = group.sort_values('year')
-    coords = group[['center_lat', 'center_lon']].values
-    year = group['year'].iloc[0]
-    year_idx = years.index(year)
+# 调试步骤 7：测试已知点
+print("\n调试步骤 7：测试已知点")
+# 示例：测试纽约 (经度: -74.0060, 纬度: 40.7128) 和巴黎 (经度: 2.3522, 纬度: 48.8566)
+test_points = pd.DataFrame({
+    'center_lon': [-74.0060, 2.3522],
+    'center_lat': [40.7128, 48.8566],
+    'name': ['New York', 'Paris']
+})
+test_gdf = gpd.GeoDataFrame(
+    test_points,
+    geometry=[Point(lon, lat) for lon, lat in zip(test_points['center_lon'], test_points['center_lat'])],
+    crs="EPSG:4326"
+)
+test_result = gpd.sjoin(test_gdf, gdf_boundaries, how='left', predicate='within')
+test_result['region_name'] = test_result['Region'].str.split(',').str[0]
+print("已知点测试结果:")
+print(test_result[['name', 'region_name']])
 
-    visited_cells = set()  # 每条轨迹一个集合，防止重复计数
+# 7. 将结果合并回原始 DataFrame
+df = df.reset_index(drop=True)
+gdf_points = gdf_points.reset_index(drop=True)
+df['region_name'] = gdf_points['region_name']
 
-    for i in range(len(coords) - 1):
-        lat1, lon1 = coords[i]
-        lat2, lon2 = coords[i + 1]
-
-        # ------- 处理经度跳跃 -------
-        lon_diff = lon2 - lon1
-        if abs(lon_diff) > 180:
-            if lon_diff > 0:
-                lon2 -= 360  # 比如 170 到 -175，应看成 170 到 185
-            else:
-                lon2 += 360
-
-        # 插值密度
-        steps = max(abs(lat2 - lat1), abs(lon2 - lon1)) / 0.2
-        for t in np.linspace(0, 1, int(steps) + 1):
-            lat = lat1 + t * (lat2 - lat1)
-            lon = lon1 + t * (lon2 - lon1)
-
-            # 插值后经度修正回 [-180, 180]
-            if lon > 180:
-                lon -= 360
-            elif lon < -180:
-                lon += 360
-
-            lat_idx = np.digitize(lat, lat_bins) - 1
-            lon_idx = np.digitize(lon, lon_bins) - 1
-
-            if 0 <= lat_idx < len(lat_bins) - 1 and 0 <= lon_idx < len(lon_bins) - 1:
-                cell_key = (lat_idx, lon_idx)
-                if cell_key not in visited_cells:
-                    path_count_data[year_idx, lat_idx, lon_idx] += 1
-                    visited_cells.add(cell_key)
-
-# ---------- 写入 NetCDF ----------
-traj_path_count[:] = path_count_data
-dataset.close()
-
-print(f"轨迹路径格点计数已保存至 traj_paths_{grid_resolution}deg.nc")
+# 8. 输出结果
+output_file = 'trajectories_with_region_new.csv'
+df.to_csv(output_file, index=False)
+print(f"\n结果已保存至 {output_file}")

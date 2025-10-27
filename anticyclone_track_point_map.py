@@ -40,11 +40,11 @@ trajectory_dict = {}
 # 将相同ids的点连接成线
 for i, traj_id in enumerate(ids):
     if traj_id not in trajectory_dict:
-        trajectory_dict[traj_id] = {'lons': [], 'lats': [], 'pressure': []}
+        trajectory_dict[traj_id] = {'lons': [], 'lats': [], 'stream': []}
 
     trajectory_dict[traj_id]['lons'].append(lons[i])
     trajectory_dict[traj_id]['lats'].append(lats[i])
-    trajectory_dict[traj_id]['pressure'].append(pressure[i])
+    trajectory_dict[traj_id]['stream'].append(pressure[i])
 
 # 绘制每条轨迹和点
 for traj_id, traj_data in trajectory_dict.items():
@@ -52,7 +52,7 @@ for traj_id, traj_data in trajectory_dict.items():
     ax.plot(traj_data['lons'], traj_data['lats'], color='black', linewidth=0.2, transform=ccrs.PlateCarree())
 
     # 绘制每个点，根据压力值选择颜色
-    for lon, lat, pres in zip(traj_data['lons'], traj_data['lats'], traj_data['pressure']):
+    for lon, lat, pres in zip(traj_data['lons'], traj_data['lats'], traj_data['stream']):
         ax.scatter(lon, lat, c=pres, cmap=cmap, norm=norm, s=1, transform=ccrs.PlateCarree())
 
 # 添加颜色条

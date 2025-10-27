@@ -308,18 +308,18 @@ def calculate_high_centers(inner_contours, lon, lat, pressure):
         grid_p = pressure[lat_idx, lon_idx]
         if not np.isnan(grid_p) and grid_p >= 1010:
             if tree_id in high_centers:
-                if grid_p > high_centers[tree_id]['pressure']:
+                if grid_p > high_centers[tree_id]['stream']:
                     high_centers[tree_id] = {
                         'lon': grid_lon,
                         'lat': grid_lat,
-                        'pressure': grid_p,
+                        'stream': grid_p,
                         'tree_id': tree_id
                     }
             else:
                 high_centers[tree_id] = {
                     'lon': grid_lon,
                     'lat': grid_lat,
-                    'pressure': grid_p,
+                    'stream': grid_p,
                     'tree_id': tree_id
                 }
     return list(high_centers.values())
@@ -346,13 +346,13 @@ for center in high_centers:
         'date': date_str,
         'center_lon': f"{center['lon']:.2f}",
         'center_lat': f"{center['lat']:.2f}",
-        'pressure': f"{center['pressure']:.2f}",
+        'stream': f"{center['stream']:.2f}",
         'contour_points': points_str
     })
 
 csv_path = 'high_pressure_systems_20200527_test3.csv'
 with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-    writer = csv.DictWriter(f, fieldnames=['date', 'center_lon', 'center_lat', 'pressure', 'contour_points'])
+    writer = csv.DictWriter(f, fieldnames=['date', 'center_lon', 'center_lat', 'stream', 'contour_points'])
     writer.writeheader()
     writer.writerows(csv_rows)
 
