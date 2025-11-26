@@ -1,0 +1,23 @@
+# 数据文件（全部忽略）
+*.nc
+*.csv
+*.pkl
+*.h5
+*.zip
+*.tar.gz
+*.png
+*.txt
+
+# 目录整个忽略
+example_data/
+result/
+trashdata/
+__pycache__/
+.pytest_cache/
+.idea/
+
+# 模型权重和缓存
+*.pth
+*.pt
+*.ckpt
+*.bin

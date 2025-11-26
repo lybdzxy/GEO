@@ -1,0 +1,66 @@
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+import pandas as pd
+import skfuzzy as fuzz
+
+try:
+    # 读取Excel文件
+    data_path = f'E:/GEO/etccdi/coor_pc1.xlsx'
+    data = pd.read_excel(data_path)
+    data = data.to_numpy()
+
+    # 选取用于聚类的列
+    data_for_clustering = data[:, :3]
+
+    # 标准化数据
+    scaler = StandardScaler()
+    data_for_clustering_scaled = scaler.fit_transform(data_for_clustering)
+
+    # 定义聚类数量的范围
+    min_clusters = 2
+    max_clusters = 12
+
+    # 初始化最优轮廓系数和对应的聚类数量
+    best_score = -1
+    best_n_clusters = min_clusters
+
+    # 循环尝试不同的聚类数量
+    for n_clusters in range(min_clusters, max_clusters + 1):
+        # 使用Fuzzy C-Means算法进行聚类
+        cntr, u, u0, d, jm, p, fpc = fuzz.cluster.cmeans(
+            data_for_clustering_scaled.T, n_clusters, 2, error=0.005, maxiter=1000, init=None, seed=42
+        )
+
+        # 计算模糊分割系数（FPC）
+        silhouette_avg = fpc
+        print(f'Clusters: {n_clusters}, Fuzzy Partition Coefficient: {silhouette_avg:.4f}')
+
+        # 如果当前模糊分割系数更高，则更新最优值
+        if silhouette_avg > best_score:
+            best_score = silhouette_avg
+            best_n_clusters = n_clusters
+
+    # 使用最优的聚类数量进行最终的Fuzzy C-Means聚类
+    cntr, u, u0, d, jm, p, fpc = fuzz.cluster.cmeans(
+        data_for_clustering_scaled.T, best_n_clusters, 2, error=0.005, maxiter=1000, init=None, seed=42
+    )
+
+    # 获取硬分类标签
+    labels = np.argmax(u, axis=0)
+
+    # 将聚类标签添加到原数据中
+    data_with_labels = np.column_stack((data_for_clustering, labels))
+    result = {}
+    for i in data_with_labels:
+        lon, lat, pc1, cluster = i
+        result[(lon, lat)] = (pc1, cluster)
+    result_df = pd.DataFrame(result).T  # 转置数据
+
+    # 重新命名列
+    result_df.columns = ['pc1', 'cluster']
+
+    # 将结果保存为NetCDF文件
+    result_df.to_xarray().to_netcdf(f'E:/GEO/result/ecm/etccdi_fcm.nc')
+
+except Exception as e:
+    print(f'Error processing: {e}')

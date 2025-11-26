@@ -1,0 +1,327 @@
+import csv
+import time
+import xarray as xr
+from matplotlib.path import Path
+import warnings
+import numpy as np
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import pandas as pd
+import concurrent.futures
+from tqdm import tqdm
+
+start = time.time()
+warnings.filterwarnings("ignore")
+
+
+# ============================
+# 函数定义
+# ============================
+
+def calculate_radius(contour):
+    """计算等高线的平均半径"""
+    center_x = np.mean(contour[:, 0])
+    center_y = np.mean(contour[:, 1])
+    distances = np.sqrt((contour[:, 0] - center_x) ** 2 + (contour[:, 1] - center_y) ** 2)
+    return np.mean(distances)
+
+
+def build_containment_dict(filtered_contours):
+    """构建等高线之间的包含关系字典"""
+    containment_dict = {}
+    paths = [Path(contour) for contour in filtered_contours]
+    for i, outer_path in enumerate(paths):
+        containment_dict[i] = []
+        for j, inner_path in enumerate(paths):
+            if i != j and np.all(outer_path.contains_points(inner_path.vertices)):
+                containment_dict[i].append(j)
+    return containment_dict
+
+
+class TreeNode:
+    """树节点类，用于表示等高线的层次结构"""
+
+    def __init__(self, contour_index):
+        self.contour_index = contour_index
+        self.children = []
+        self.depth = 1
+
+    def add_child(self, child_node):
+        self.children.append(child_node)
+
+    def __repr__(self):
+        return f"TreeNode({self.contour_index}, depth={self.depth}, children={len(self.children)})"
+
+
+def build_trees(containment_dict):
+    """根据包含关系构建树结构"""
+    nodes = {i: TreeNode(i) for i in containment_dict}
+    all_indices = set(containment_dict.keys())
+    contained_indices = set()
+    for contained in containment_dict.values():
+        contained_indices.update(contained)
+    root_indices = list(all_indices - contained_indices)
+
+    for i, children in containment_dict.items():
+        node = nodes[i]
+        for child_index in children:
+            node.add_child(nodes[child_index])
+    return [nodes[r] for r in root_indices]
+
+
+def update_depth(node):
+    """更新树的深度"""
+    if node.children:
+        child_depths = [update_depth(child) for child in node.children]
+        node.depth = 1 + max(child_depths)
+    return node.depth
+
+
+def clean_trees(trees):
+    """清洗树结构：只保留深度 >= 5 的树"""
+    return [t for t in trees if t.depth >= 1]
+
+
+def extract_leaf_contours(cleaned_trees, filtered_contours):
+    """提取潜在高中心（所有叶节点）"""
+    leaf_contours = []
+    seen_contour_indices = set()
+    for tree in cleaned_trees:
+        stack = [tree]
+        while stack:
+            node = stack.pop()
+            if not node.children and node.contour_index not in seen_contour_indices:
+                leaf_contours.append({
+                    'contour': filtered_contours[node.contour_index],
+                    'tree_id': tree.contour_index
+                })
+                seen_contour_indices.add(node.contour_index)
+            else:
+                stack.extend(node.children)
+    return leaf_contours
+
+
+def calculate_potential_high_centers(leaf_contours, lon, lat, height):
+    """计算潜在高中心"""
+    if lat[-1] < lat[0]:
+        lat = lat[::-1]
+        height = height[::-1, :]
+    potential_centers = []
+    seen_centers = set()
+    for contour_data in leaf_contours:
+        contour = contour_data['contour']
+        tree_id = contour_data['tree_id']
+        center_lon = np.mean(contour[:, 0])
+        center_lat = np.mean(contour[:, 1])
+        center_lon = np.clip(center_lon, lon.min(), lon.max())
+        center_lat = np.clip(center_lat, lat.min(), lat.max())
+        lon_idx = np.argmin(np.abs(lon - center_lon))
+        lat_idx = np.argmin(np.abs(lat - center_lat))
+        grid_lon = lon[lon_idx]
+        grid_lat = lat[lat_idx]
+        grid_h = height[lat_idx, lon_idx]
+        if not np.isnan(grid_h) and grid_h > 1200:  # 高中心阈值1200 gpm
+            center_tuple = (grid_lon, grid_lat, grid_h)
+            if center_tuple not in seen_centers:
+                potential_centers.append({
+                    'lon': grid_lon,
+                    'lat': grid_lat,
+                    'z': grid_h,  # 保持字段名一致
+                    'tree_id': tree_id
+                })
+                seen_centers.add(center_tuple)
+    return potential_centers
+
+
+# ============================
+# 单时间步处理函数
+# ============================
+
+def process_single_time(target_time, file_path_template='F:/ERA5/hourly/lvl/{hour}z/ERA5_{hour}z_lvl_{year}{month}.nc'):
+    """处理单个时间步的850hPa位势高度数据并返回高中心识别结果"""
+    try:
+        # 1. 数据读取与预处理
+        year = target_time[:4]
+        month = target_time[5:7]
+        hour = target_time[-2:]  # 提取小时 (00, 06, 12, 18)
+        hour_z = f"{int(hour)}z"  # 转换为文件名中的格式 (0z, 6z, 12z, 18z)
+        file_path = file_path_template.format(year=year, month=month, hour=int(hour))
+        ds = xr.open_dataset(file_path)
+
+        # 动态选择维度名称
+        time_dim = 'time' if 'time' in ds.dims else 'valid_time'
+        level_dim = 'level' if 'level' in ds.dims else 'pressure_level'
+
+        # 选择850hPa数据
+        data_sel = ds.sel({time_dim: target_time, level_dim: 850})
+
+        lon = data_sel['longitude'].values
+        lat = data_sel['latitude'].values
+        g = 9.80665  # 重力加速度 (m/s²)
+        height = data_sel['z'].values.squeeze() / g  # 转换为位势高度 (gpm)
+
+        # 将位势高度低于1000 gpm的部分设为nan（聚焦高值区域）
+        height_above_1000 = np.where(height >= 1000, height, np.nan)
+
+        # 2. 绘制等高线
+        interval = 50  # 位势高度间隔50 gpm
+        img_extent = [0, 358.5, -90, 90]  # 根据数据信息调整范围
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_subplot(111, projection=ccrs.PlateCarree())
+        ax.set_extent(img_extent, crs=ccrs.PlateCarree())
+        contours = plt.contour(
+            lon, lat, height_above_1000,
+            levels=np.arange(1000, np.nanmax(height_above_1000) + interval, interval),
+            transform=ccrs.PlateCarree(), colors='black'
+        )
+        plt.close(fig)
+
+        # 3. 查找闭合等高线
+        closed_contours = []
+        tolerance = 0.001
+        for c in contours.collections:
+            for path in c.get_paths():
+                vertices = path.vertices
+                codes = path.codes
+                if codes is None:
+                    if np.allclose(vertices[0], vertices[-1], atol=tolerance):
+                        closed_contours.append(vertices)
+                    continue
+                sub_path_vertices = []
+                for i, code in enumerate(codes):
+                    if code == Path.MOVETO:
+                        if sub_path_vertices and np.allclose(sub_path_vertices[0], sub_path_vertices[-1],
+                                                             atol=tolerance):
+                            closed_contours.append(np.array(sub_path_vertices))
+                        sub_path_vertices = [vertices[i]]
+                    elif code == Path.LINETO:
+                        sub_path_vertices.append(vertices[i])
+                    elif code == Path.CLOSEPOLY:
+                        sub_path_vertices.append(vertices[i])
+                        if np.allclose(sub_path_vertices[0], sub_path_vertices[-1], atol=tolerance):
+                            closed_contours.append(np.array(sub_path_vertices))
+                        sub_path_vertices = []
+                if sub_path_vertices and np.allclose(sub_path_vertices[0], sub_path_vertices[-1], atol=tolerance):
+                    closed_contours.append(np.array(sub_path_vertices))
+
+        # 4. 筛选半径大于阈值的等高线
+        min_radius_threshold = 0.5
+        filtered_contours = [contour for contour in closed_contours if
+                             calculate_radius(contour) >= min_radius_threshold]
+
+        # 5. 构建包含关系字典
+        containment_dict = build_containment_dict(filtered_contours)
+
+        # 6. 构建树结构
+        trees = build_trees(containment_dict)
+        for root in trees:
+            update_depth(root)
+
+        # 7. 树清洗逻辑
+        cleaned_trees = clean_trees(trees)
+
+        # 8. 提取潜在高中心
+        leaf_contours = extract_leaf_contours(cleaned_trees, filtered_contours)
+        potential_high_centers = calculate_potential_high_centers(leaf_contours, lon, lat, height_above_1000)
+
+        # 9. 准备CSV行数据
+        date_str = target_time.replace('-', '').replace(':', '')[:12]
+        csv_rows = []
+        for center in potential_high_centers:
+            csv_rows.append({
+                'date': date_str,
+                'center_lon': f"{center['lon']:.2f}",
+                'center_lat': f"{center['lat']:.2f}",
+                'z': f"{center['z']:.2f}"
+            })
+        return csv_rows
+    except Exception as e:
+        print(f"错误处理时间 {target_time}: {str(e)}")
+        return []
+
+
+# ============================
+# 主程序
+# ============================
+
+if __name__ == "__main__":
+    # 生成时间范围（1940年1月1日到2024年12月31日，每6小时）
+    start_date = '1940-01-01'
+    end_date = '2024-12-31'
+    dates = pd.date_range(start=start_date, end=end_date, freq='D')
+    target_times = [f"{date.strftime('%Y-%m-%d')}-{hour:02d}" for date in dates for hour in [0, 6, 12, 18]]
+
+    # 输出文件路径
+    output_file = 'potential_high_centers_850hpa_z.csv'
+
+    # 按年份分组 target_times
+    times_by_year = {}
+    for target_time in target_times:
+        year = target_time[:4]
+        if year not in times_by_year:
+            times_by_year[year] = []
+        times_by_year[year].append(target_time)
+
+    # 初始化 CSV 文件并写入表头
+    with open(output_file, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=['date', 'center_lon', 'center_lat', 'z'])
+        writer.writeheader()
+
+    # 日志文件路径
+    error_log_path = "error_log_z.txt"
+    empty_log_path = "empty_results_log_z.txt"
+
+    # 清空旧日志
+    open(error_log_path, 'w', encoding='utf-8').close()
+    open(empty_log_path, 'w', encoding='utf-8').close()
+
+    # 按年循环处理
+    for year in sorted(times_by_year.keys()):
+        print(f"开始处理 {year} 年")
+        year_times = times_by_year[year]
+        results = {target_time: [] for target_time in year_times}
+
+        # 暂存当年日志信息
+        year_error_logs = []
+        year_empty_logs = []
+
+        # 使用多进程处理该年的时间步
+        with concurrent.futures.ProcessPoolExecutor(max_workers=16) as executor:
+            futures = {executor.submit(process_single_time, target_time): target_time for target_time in year_times}
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures),
+                               desc=f"处理 {year} 年时间步"):
+                target_time = futures[future]
+                try:
+                    csv_rows = future.result()
+                    results[target_time] = csv_rows
+                except Exception as e:
+                    msg = f"[{target_time}] {str(e)}"
+                    print(f"错误处理时间 {target_time}: {str(e)}")
+                    year_error_logs.append(msg)
+                    results[target_time] = []
+
+        # 按时间顺序写入该年的结果
+        with open(output_file, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['date', 'center_lon', 'center_lat', 'z'])
+            for target_time in year_times:
+                if results[target_time]:
+                    for row in results[target_time]:
+                        writer.writerow(row)
+                else:
+                    year_empty_logs.append(f"[{target_time}] 无高中心记录")
+
+        # 写入年度日志
+        if year_error_logs:
+            with open(error_log_path, 'a', encoding='utf-8') as log_file:
+                log_file.write(f"\n===== {year} 年错误日志 =====\n")
+                log_file.write("\n".join(year_error_logs) + "\n")
+
+        if year_empty_logs:
+            with open(empty_log_path, 'a', encoding='utf-8') as log_file:
+                log_file.write(f"\n===== {year} 年无高中心 =====\n")
+                log_file.write("\n".join(year_empty_logs) + "\n")
+
+        print(f"完成 {year} 年，写入 CSV 与日志")
+        results.clear()
+
+    print(f"总运行时间: {time.time() - start:.2f} 秒")
