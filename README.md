@@ -66,3 +66,36 @@ dask: `dask-etccdi.py`
 `test3`
 `eof_test1`
 `reof_test1`
+
+# 7.郑州极端降水分析 (2021.7.20)
+## 7.1.环流分析
+环流场分析: `zhengzhou/zhengzhou_circulation_analysis.py`
+- 500hPa/850hPa位势高度场和风场
+- 水汽通量和辐合分析
+- 副热带高压、低涡等系统识别
+
+## 7.2.垂直廓线分析
+垂直结构分析: `zhengzhou/zhengzhou_vertical_profile.py`
+- 温度、湿度、风速垂直廓线
+- 温度露点差分析
+- 垂直风切变分析
+
+## 7.3.涡度散度分析
+动力分析: `zhengzhou/zhengzhou_vorticity_divergence.py`
+- 涡度和散度场分析
+- 涡度平流分析
+- 涡度垂直剖面
+
+## 7.4.热力学指数分析
+热力分析: `zhengzhou/zhengzhou_thermodynamic_indices.py`
+- K指数、SI指数计算
+- 相当位温分析
+- 整层可降水量 (IWV)
+- 大气不稳定度评估
+
+## 7.5.综合分析
+综合分析: `zhengzhou/zhengzhou_comprehensive_analysis.py`
+- 时间序列分析
+- 霍夫莫勒图
+- 关键时刻对比
+- 动力-热力耦合分析
