@@ -3,7 +3,7 @@
 Thermodynamic instability indices analysis for Zhengzhou extreme precipitation (2021.7.20)
 
 功能：
-1. 计算对流有效位能 (CAPE)
+1. 计算对流有效位能 (CAPE, 简化估算)
 2. 计算K指数、SI指数、LI指数等
 3. 假相当位温分析
 4. 垂直积分水汽通量

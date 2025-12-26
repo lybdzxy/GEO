@@ -5,7 +5,7 @@ Vertical profile analysis for Zhengzhou extreme precipitation event (2021.7.20)
 功能：
 1. 温度、湿度、风速垂直廓线
 2. 温度露点差分析
-3. 垂直环流剖面分析（经向/纬向）
+3. 垂直风切变分析
 
 使用ERA5数据进行分析
 """
@@ -14,8 +14,6 @@ import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
-import metpy.calc as mpcalc
-from metpy.units import units
 import os
 from datetime import datetime
 
@@ -233,87 +231,6 @@ def plot_humidity_profile(q, p, ax):
     
     ax.set_xlim(0, 20)
     ax.grid(True, alpha=0.3)
-
-
-def plot_vertical_cross_section(data, center_lon, center_lat, extent, direction='zonal', ax=None):
-    """
-    绘制垂直剖面图
-    
-    参数:
-        data: 包含u, v, w, t, q等变量的数据集
-        center_lon, center_lat: 剖面中心点
-        extent: 剖面范围 (度)
-        direction: 'zonal' (东西向) 或 'meridional' (南北向)
-        ax: matplotlib轴对象
-    """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(12, 6))
-    
-    # 提取变量
-    u = data['u']
-    v = data['v']
-    w = data.get('w', None)  # 垂直速度可能没有
-    
-    # 统一维度名称
-    if 'level' in u.dims:
-        u = u.rename({'level': 'pressure_level'})
-        v = v.rename({'level': 'pressure_level'})
-        if w is not None:
-            w = w.rename({'level': 'pressure_level'})
-    
-    p_levels = u.pressure_level.values
-    
-    if direction == 'zonal':
-        # 东西向剖面
-        u_slice = u.sel(latitude=center_lat, method='nearest')
-        v_slice = v.sel(latitude=center_lat, method='nearest')
-        
-        lon = u_slice.longitude.values if 'longitude' in u_slice.dims else u_slice.lon.values
-        lon_mask = (lon >= center_lon - extent) & (lon <= center_lon + extent)
-        
-        u_slice = u_slice.isel(longitude=lon_mask)
-        v_slice = v_slice.isel(longitude=lon_mask)
-        
-        x_coord = u_slice.longitude.values if 'longitude' in u_slice.dims else u_slice.lon.values
-        xlabel = '经度 (°E)'
-        wind_component = u_slice  # 东西风分量
-        
-    else:  # meridional
-        # 南北向剖面
-        u_slice = u.sel(longitude=center_lon, method='nearest')
-        v_slice = v.sel(longitude=center_lon, method='nearest')
-        
-        lat = u_slice.latitude.values if 'latitude' in u_slice.dims else u_slice.lat.values
-        lat_mask = (lat >= center_lat - extent) & (lat <= center_lat + extent)
-        
-        u_slice = u_slice.isel(latitude=lat_mask)
-        v_slice = v_slice.isel(latitude=lat_mask)
-        
-        x_coord = u_slice.latitude.values if 'latitude' in u_slice.dims else u_slice.lat.values
-        xlabel = '纬度 (°N)'
-        wind_component = v_slice  # 南北风分量
-    
-    # 创建网格
-    xx, yy = np.meshgrid(x_coord, p_levels)
-    
-    # 绘制风速填充
-    levels = np.arange(-30, 32, 2)
-    cf = ax.contourf(xx, yy, wind_component.values, levels=levels,
-                     cmap='RdBu_r', extend='both')
-    
-    ax.set_ylim(1000, 100)
-    ax.set_ylabel('气压 (hPa)', fontsize=10)
-    ax.set_xlabel(xlabel, fontsize=10)
-    
-    # 标记中心位置
-    if direction == 'zonal':
-        ax.axvline(center_lon, color='red', linewidth=2, linestyle='--', label='郑州')
-    else:
-        ax.axhline(center_lat, color='red', linewidth=2, linestyle='--', label='郑州')
-    
-    ax.invert_yaxis()
-    
-    return cf
 
 
 def main():

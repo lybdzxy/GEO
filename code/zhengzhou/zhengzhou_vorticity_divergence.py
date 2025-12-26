@@ -5,7 +5,7 @@ Vorticity and divergence analysis for Zhengzhou extreme precipitation event (202
 功能：
 1. 涡度和散度场分析
 2. 涡度平流分析
-3. 垂直涡度收支分析
+3. 涡度垂直剖面分析
 
 使用ERA5数据进行分析
 """

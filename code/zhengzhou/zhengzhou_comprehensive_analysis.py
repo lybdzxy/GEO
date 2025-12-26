@@ -149,26 +149,6 @@ def plot_hovmoller(data, times, coord, ax, title, cmap='RdBu_r',
     return cf
 
 
-def calculate_composite_anomaly(data, times, event_time, hours_before=24, hours_after=24):
-    """
-    计算事件前后的合成距平
-    """
-    event_idx = np.argmin([abs((t - event_time).total_seconds()) for t in times])
-    
-    # 事件前平均
-    start_idx = max(0, event_idx - hours_before)
-    before_mean = np.mean(data[start_idx:event_idx], axis=0)
-    
-    # 事件时
-    event_data = data[event_idx]
-    
-    # 事件后平均
-    end_idx = min(len(times), event_idx + hours_after + 1)
-    after_mean = np.mean(data[event_idx+1:end_idx], axis=0)
-    
-    return before_mean, event_data, after_mean
-
-
 def main():
     """主程序"""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
